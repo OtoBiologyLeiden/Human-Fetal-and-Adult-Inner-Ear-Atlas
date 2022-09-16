@@ -1,1 +1,2525 @@
+---
+title: "Generation of human inner ear atlas"
+author: "Wouter van der Valk"
+date: "16-09-2022"
+output: html_document
+---
 
+For generation of human inner ear atlas and subsequent mapping of the combined scRNAseq and snRNAseq data, we used Symphony (Kang, J.B.; 2021, Nature Communications). Vigennete available on https://github.com/immunogenomics/symphony/blob/main/vignettes/Seurat.ipynb using https://rdrr.io/github/immunogenomics/symphony/src/vignettes/utils_seurat.R
+
+## Combining datasets
+```{r Generate datasets}
+IE_adult_1.data <- Read10X(data.dir = "~/data/Adult/outs/filtered_feature_bc_matrix/")
+IE_fetal_W92_1.data <- Read10X(data.dir = "~/data/W9.2/outs/filtered_feature_bc_matrix/")
+IE_fetal_W75_1.data <- Read10X(data.dir = "~/data/W7.5/outs/filtered_feature_bc_matrix/")
+
+IE_dev <- CreateSeuratObject(counts = cbind(IE_adult_1.data, IE_fetal_W92_1.data, IE_fetal_W75_1.data))
+```
+
+### Provide dataset with experimental information
+```{r Create experiment}
+IE_dev@meta.data$experiment <- c(rep("Adult_1_isolation211203", ncol(IE_adult_1.data)), rep("Fetal_W92_1_isolation220121",
+ncol(IE_fetal_W92_1.data)), rep("Fetal_W75_1_isolation220204", ncol(IE_fetal_W75_1.data)))
+
+## FoA: Fetal or Adult
+IE_dev@meta.data$FoA <- c(rep("adult", ncol(IE_adult_1.data)), rep("fetal", ncol(IE_fetal_W92_1.data)), rep("fetal", ncol(IE_fetal_W75_1.data)))
+
+## FW: Fetal age Week
+IE_dev@meta.data$FW <- c(rep("adult", ncol(IE_adult_1.data)), rep("9", ncol(IE_fetal_W92_1.data)), rep("7", ncol(IE_fetal_W75_1.data)))
+
+## Technique
+IE_dev@meta.data$technique <- c(rep("sn", ncol(IE_adult_1.data)), rep("sn", ncol(IE_fetal_W92_1.data)), rep("sn", ncol(IE_fetal_W75_1.data)))
+
+table(IE_dev$experiment)
+table(IE_dev$FoA)
+table(IE_dev$FW)
+table(IE_dev$technique)
+
+saveRDS(IE_dev, "~/output/IE_dev.rds")
+```
+
+## Perform QC
+```{r Compute QC parameters}
+# Compute number of genes per UMI
+IE_dev$log10GenesPerUMI <- log10(IE_dev$nFeature_RNA) / log10(IE_dev$nCount_RNA)
+
+# Compute percentage of ribosomal genes
+IE_dev$RiboRatio <- PercentageFeatureSet(object = IE_dev, pattern = "^RP[SL]")
+IE_dev$RiboRatio <- IE_dev@meta.data$RiboRatio / 100
+
+# Compute percentage of mitochondrial genes
+IE_dev$MitoRatio <- PercentageFeatureSet(object = IE_dev, pattern = "^MT-")
+IE_dev$MitoRatio <- IE_dev@meta.data$MitoRatio / 100
+```
+
+```{r Rename nCount_RNA to nUMI and nFeature_RNA to nGene}
+IE_dev_meta <- IE_dev@meta.data
+IE_dev_meta$cells <- rownames(IE_dev_meta)
+IE_dev_meta <- IE_dev_meta %>%
+  dplyr::rename(seq_folder = orig.ident,
+                nUMI = nCount_RNA,
+                nGene = nFeature_RNA)
+IE_dev@meta.data <- IE_dev_meta
+```
+
+```{r Visualisation of QC data}
+metadata_IE_dev <- IE_dev@meta.data
+```
+
+```{r Nucleus counts sn data}
+metadata_IE_dev %>% 
+  ggplot(aes(x=experiment, fill=experiment)) + 
+  geom_bar() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  ggtitle("Nucleus counts")
+```
+
+```{r UMI counts per nucleus sn data}
+metadata_IE_dev %>% 
+  ggplot(aes(color=experiment, x=nUMI, fill= experiment)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() +
+  ylab("Cell density") +
+  geom_vline(xintercept = 500) +
+  ggtitle("UMI counts per nuclei")
+```
+
+```{r Genes per nucleus sn data}
+metadata_IE_dev %>% 
+  ggplot(aes(color=experiment, x=nGene, fill= experiment)) + 
+  geom_density(alpha = 0.2) + 
+  theme_classic() +
+  scale_x_log10() + 
+  geom_vline(xintercept = 300)+
+  ggtitle("Genes per nucleus histo")
+
+metadata_IE_dev %>% 
+  ggplot(aes(x=experiment, y=log10(nGene), fill=experiment)) + 
+  geom_boxplot() + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  theme(plot.title = element_text(hjust=0.5, face="bold")) +
+  ggtitle("Genes per nucleus box")
+```
+
+```{r UMIs versus genes sn data}
+metadata_IE_dev %>% 
+  ggplot(aes(x=nUMI, y=nGene, color=MitoRatio)) + 
+  geom_point() + 
+  scale_colour_gradient(low = "gray90", high = "black") +
+  stat_smooth(method=lm) +
+  scale_x_log10() + 
+  scale_y_log10() + 
+  theme_classic() +
+  geom_vline(xintercept = 500) +
+  geom_hline(yintercept = 250) +
+  facet_wrap(~experiment) +
+  ggtitle("UMIs versus genes")
+```
+
+```{r Mitochondrial counts sn data}
+metadata_IE_dev %>% 
+  ggplot(aes(color=experiment, x=MitoRatio, fill=experiment)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() +
+  geom_vline(xintercept = 0.01) +
+  ggtitle("Mitochondrial counts ratio")
+```
+
+```{r Ribosomal counts sn data}
+metadata_IE_dev %>% 
+  ggplot(aes(color=experiment, x=RiboRatio, fill=experiment)) + 
+  geom_density(alpha = 0.2) + 
+  scale_x_log10() + 
+  theme_classic() +
+  ggtitle("Ribosomal counts ratio")
+```
+
+```{r Complexity sn data}
+metadata_IE_dev %>%
+  ggplot(aes(x=log10GenesPerUMI, color = experiment, fill=experiment)) +
+  geom_density(alpha = 0.2) +
+  theme_classic() +
+  geom_vline(xintercept = 0.8) +
+  ggtitle("Complexity")
+```
+
+### Evaluating effects of cell cycle, mitochondrial genes, and ribosomal genes
+```{r Normalize}
+IE_dev_cellcycle <- NormalizeData(IE_dev)
+```
+
+```{r Cell cycle effect}
+load("~/data/cycle.rda")
+IE_dev_cellcycle <- CellCycleScoring(IE_dev_cellcycle, 
+                                 g2m.features = g2m_genes, 
+                                 s.features = s_genes)
+IE_dev_cellcycle <- FindVariableFeatures(IE_dev_cellcycle, 
+                     selection.method = "vst",
+                     nfeatures = 2000, 
+                     verbose = FALSE)
+IE_dev_cellcycle <- ScaleData(IE_dev_cellcycle)
+IE_dev_cellcycle <- RunPCA(IE_dev_cellcycle)
+DimPlot_cellcycle <- DimPlot(IE_dev_cellcycle,
+        reduction = "pca",
+        group.by= "Phase",
+        split.by = "Phase",
+        raster=FALSE) & NoLegend() & NoAxes()
+```
+
+```{r Cell cycle effect plot}
+pdf("DimPlot_cellcycle.pdf", width = 8, height = 4)
+print(DimPlot_cellcycle)
+dev.off()
+DimPlot_cellcycle
+```
+
+#### Evaluating effects of mitochodrial expression
+```{r MitoRatio effects}
+summary(IE_dev_cellcycle@meta.data$MitoRatio)
+IE_dev_cellcycle@meta.data$mitoFr <- cut(IE_dev_cellcycle@meta.data$MitoRatio, 
+                   breaks=c(-Inf, 0.0002368, 0.0005959, 0.0013525, Inf), 
+                   labels=c("Low","Medium","Medium high", "High"))
+DimPlot_MitoRatio <- DimPlot(IE_dev_cellcycle,
+        reduction = "pca",
+        group.by= "mitoFr",
+        split.by = "mitoFr", raster = FALSE) & NoLegend() & NoAxes()
+
+pdf("DimPlot_MitoRatio.pdf", width = 9, height = 4)
+print(DimPlot_MitoRatio)
+dev.off()
+DimPlot_MitoRatio
+```
+
+A difference between MitoRatio can be identified.
+
+#### Evaluating effects of ribosomal expression
+```{r RiboRatio effects}
+summary(IE_dev_cellcycle@meta.data$RiboRatio)
+IE_dev_cellcycle@meta.data$riboFr <- cut(IE_dev_cellcycle@meta.data$RiboRatio, 
+                   breaks=c(-Inf, 0.006034, 0.011758, 0.020894, Inf), 
+                   labels=c("Low","Medium","Medium high", "High"))
+DimPlot_RiboRatio <- DimPlot(IE_dev_cellcycle,
+        reduction = "pca",
+        group.by= "riboFr",
+        split.by = "riboFr", raster = FALSE) & NoLegend() & NoAxes()
+
+pdf("DimPlot_RiboRatio.pdf", width = 9, height = 4) 
+print(DimPlot_RiboRatio)
+dev.off()
+DimPlot_RiboRatio
+```
+
+```{r Subsetting IE_dev based on QC above}
+IE_dev_filtered <- subset(IE_dev, subset = (nUMI >= 500) & (nGene >= 750) & (log10GenesPerUMI >0.80) & (MitoRatio < 0.01) & (RiboRatio < 0.1))
+
+table(IE_dev_filtered$experiment)
+table(IE_dev_filtered$FoA)
+table(IE_dev_filtered$FW)
+table(IE_dev_filtered$technique)
+```
+
+```{r Save IE_dev_filtered}
+saveRDS(IE_dev_filtered, "~/output/IE_dev_filtered.rds")
+```
+
+```{r Codes needed for further script}
+plotBasic = function(umap_labels,                # metadata, with UMAP labels in UMAP1 and UMAP2 slots
+                        title = 'Query',         # Plot title
+                        color.by = 'cell_type',  # metadata column name for coloring
+                        facet.by = NULL,         # (optional) metadata column name for faceting
+                        color.mapping = NULL,    # custom color mapping
+                        legend.position = 'right') {  # Show cell type legend
+    
+    p = umap_labels %>%
+            dplyr::sample_frac(1L) %>% # permute rows randomly
+            ggplot(aes(x = UMAP1, y = UMAP2)) + 
+            geom_point_rast(aes(col = get(color.by)), size = 1, stroke = 0.4, shape = 16)
+        if (!is.null(color.mapping)) { p = p + scale_color_manual(values = color.mapping) }
+    
+    # Default formatting
+    p = p + theme_bw() +
+            labs(title = title, color = color.by) + 
+            theme(plot.title = element_text(hjust = 0.5)) +
+            theme(legend.position=legend.position) +
+            theme(legend.text = element_text(size=8), legend.title=element_text(size=12)) + 
+            guides(colour = guide_legend(override.aes = list(size = 4))) + guides(alpha = 'none')
+    if(!is.null(facet.by)) {
+        p = p + facet_wrap(~get(facet.by)) +
+                theme(strip.text.x = element_text(size = 12)) }    
+    return(p)
+}
+
+buildReferenceFromSeurat <- function(
+    obj, assay = 'RNA', verbose = TRUE, save_umap = TRUE, save_uwot_path = NULL
+) {
+    if(!assay %in% c('RNA', 'SCT')) {
+        stop('Only supported assays are RNA or SCT.')
+    }
+    res <- list()
+    ## TODO: check that these objects are all correctly initialized
+    res$Z_corr <- t(obj@reductions$harmony@cell.embeddings)
+    res$Z_orig <- t(obj@reductions$pca@cell.embeddings)
+    message('Saved embeddings')
+    
+    res$R <- t(obj@reductions$harmony@misc$R)
+    message('Saved soft cluster assignments')
+    
+    if (assay == 'RNA') {
+        vargenes_means_sds <- tibble(
+            symbol = obj@assays[[assay]]@var.features, 
+            mean = Matrix::rowMeans(obj@assays[[assay]]@data[obj@assays[[assay]]@var.features, ])
+        )
+        vargenes_means_sds$stddev <- rowSDs(
+            obj@assays[[assay]]@data[obj@assays[[assay]]@var.features, ], 
+            vargenes_means_sds$mean
+        )
+    } else if (assay == 'SCT') {
+        vargenes_means_sds <- tibble(
+            symbol = obj@assays[[assay]]@var.features, 
+            mean = Matrix::rowMeans(obj@assays[[assay]]@scale.data[obj@assays[[assay]]@var.features, ])
+        )
+        asdgc = Matrix(obj@assays[[assay]]@scale.data[obj@assays[[assay]]@var.features, ], sparse = TRUE)
+        vargenes_means_sds$stddev <- rowSDs(
+            asdgc, 
+            vargenes_means_sds$mean
+        )
+    }
+    
+    res$vargenes_means_sds <- vargenes_means_sds
+    message('Saved variable gene information for ', nrow(vargenes_means_sds), ' genes.')
+    
+    res$loadings <- obj@reductions$pca@feature.loadings
+    message('Saved PCA loadings.')
+    
+    res$meta_data <- obj@meta.data
+    message('Saved metadata.')
+    
+    ## Check UMAP 
+    if (save_umap) {
+        if (is.null(save_uwot_path)) {
+            error('Please provide a valid path to save_uwot_path in order to save uwot model.')
+        }
+        if (is.null(obj@reductions$umap@misc$model)) {
+            error('uwot model not initialiazed in Seurat object. Please do RunUMAP with umap.method=\'uwot\', return.model=TRUE first.')
+        }
+        res$umap <- obj@reductions$umap@misc$model
+        res$save_uwot_path <- save_uwot_path
+        if (file.exists(res$save_uwot_path)) {
+            file.remove(res$save_uwot_path)    
+        }
+        uwot::save_uwot(res$umap, save_uwot_path)
+    }
+    
+    ## Build Reference! 
+    if (verbose) 
+        message("Calculate final L2 normalized reference centroids (Y_cos)")
+    res$centroids = t(cosine_normalize_cpp(res$R %*% t(res$Z_corr), 1))
+    if (verbose) 
+        message("Calculate reference compression terms (Nr and C)")
+    res$cache = compute_ref_cache(res$R, res$Z_corr)
+    colnames(res$Z_orig) = row.names(res$metadata)
+    rownames(res$Z_orig) = paste0("PC_", seq_len(nrow(res$Z_corr)))
+    colnames(res$Z_corr) = row.names(res$metadata)
+    rownames(res$Z_corr) = paste0("harmony_", seq_len(nrow(res$Z_corr)))
+        
+    if (verbose) 
+        message("Finished nicely.")
+    return(res)    
+}
+
+environment(buildReferenceFromSeurat) <- environment(symphony::buildReference)
+
+RunHarmony.Seurat <- function(
+  object,
+  group.by.vars,
+  reduction = 'pca',
+  dims.use = NULL,
+  theta = NULL,
+  lambda = NULL,
+  sigma = 0.1,
+  nclust = NULL,
+  tau = 0,
+  block.size = 0.05,
+  max.iter.harmony = 10,
+  max.iter.cluster = 20,
+  epsilon.cluster = 1e-5,
+  epsilon.harmony = 1e-4,
+  plot_convergence = FALSE,
+  verbose = TRUE,
+  reference_values = NULL,
+  reduction.save = "harmony",
+  assay.use = 'RNA',
+  project.dim = TRUE,
+  ...
+) {
+  if (reduction == "pca") {
+    tryCatch(
+      embedding <- Seurat::Embeddings(object, reduction = "pca"),
+      error = function(e) {
+        if (verbose) {
+          message("Harmony needs PCA. Trying to run PCA now.")
+        }
+        tryCatch(
+          object <- Seurat::RunPCA(
+            object,
+            assay = assay.use, verbose = verbose
+          ),
+          error = function(e) {
+            stop("Harmony needs PCA. Tried to run PCA and failed.")
+          }
+        )
+      }
+    )
+  } else {
+    available.dimreduc <- names(methods::slot(object = object, name = "reductions"))
+    if (!(reduction %in% available.dimreduc)) {
+      stop("Requested dimension reduction is not present in the Seurat object")
+    }
+    embedding <- Seurat::Embeddings(object, reduction = reduction)
+  }
+  if (is.null(dims.use)) {
+    dims.use <- seq_len(ncol(embedding))
+  }
+  dims_avail <- seq_len(ncol(embedding))
+  if (!all(dims.use %in% dims_avail)) {
+    stop("trying to use more dimensions than computed. Rereun dimension reduction
+         with more dimensions or run Harmony with fewer dimensions")
+  }
+  if (length(dims.use) == 1) {
+    stop("only specified one dimension in dims.use")
+  }
+  metavars_df <- Seurat::FetchData(object, group.by.vars)
+    
+  harmonyObject <- HarmonyMatrix(
+    embedding,
+    metavars_df,
+    group.by.vars,
+    FALSE,
+    0,
+    theta,
+    lambda,
+    sigma,
+    nclust,
+    tau,
+    block.size,
+    max.iter.harmony,
+    max.iter.cluster,
+    epsilon.cluster,
+    epsilon.harmony,
+    plot_convergence,
+    TRUE,
+    verbose,
+    reference_values
+  )
+
+  harmonyEmbed <- t(as.matrix(harmonyObject$Z_corr))
+  rownames(harmonyEmbed) <- row.names(embedding)
+  colnames(harmonyEmbed) <- paste0(reduction.save, "_", seq_len(ncol(harmonyEmbed)))
+
+  harmonyClusters <- t(harmonyObject$R)
+  rownames(harmonyClusters) <- row.names(embedding)
+  colnames(harmonyClusters) <- paste0('R', seq_len(ncol(harmonyClusters)))
+  
+  suppressWarnings({
+    harmonydata <- Seurat::CreateDimReducObject(
+      embeddings = harmonyEmbed,
+      stdev = as.numeric(apply(harmonyEmbed, 2, stats::sd)),
+      assay = assay.use,
+      key = reduction.save,
+      misc=list(R=harmonyClusters)
+    )
+  })
+
+  object[[reduction.save]] <- harmonydata
+  if (project.dim) {
+    object <- Seurat::ProjectDim(
+      object,
+      reduction = reduction.save,
+      overwrite = TRUE,
+      verbose = FALSE
+    )
+  }
+  return(object)
+}
+
+environment(RunHarmony.Seurat) <- environment(harmony::HarmonyMatrix)
+
+RunUMAP2 <- function (object, reduction.key = "UMAP_", assay = NULL, reduction.model = NULL, 
+    return.model = FALSE, umap.method = "uwot", n.neighbors = 30L, 
+    n.components = 2L, metric = "cosine", n.epochs = NULL, learning.rate = 1, 
+    min.dist = 0.3, spread = 1, set.op.mix.ratio = 1, local.connectivity = 1L, 
+    repulsion.strength = 1, negative.sample.rate = 5, a = NULL, 
+    b = NULL, uwot.sgd = FALSE, seed.use = 42, metric.kwds = NULL, 
+    angular.rp.forest = FALSE, verbose = TRUE, ...) 
+{
+    CheckDots(...)
+    if (!is.null(x = seed.use)) {
+        set.seed(seed = seed.use)
+    }
+    if (umap.method != "umap-learn" && getOption("Seurat.warn.umap.uwot", 
+        TRUE)) {
+        warning("The default method for RunUMAP has changed from calling Python UMAP via reticulate to the R-native UWOT using the cosine metric", 
+            "\nTo use Python UMAP via reticulate, set umap.method to 'umap-learn' and metric to 'correlation'", 
+            "\nThis message will be shown once per session", 
+            call. = FALSE, immediate. = TRUE)
+        options(Seurat.warn.umap.uwot = FALSE)
+    }
+    if (umap.method == "uwot-learn") {
+        warning("'uwot-learn' is deprecated. Set umap.method = 'uwot' and return.model = TRUE")
+        umap.method <- "uwot"
+        return.model <- TRUE
+    }
+    if (return.model) {
+        if (verbose) {
+            message("UMAP will return its model")
+        }
+        umap.method = "uwot"
+    }
+    if (inherits(x = object, what = "Neighbor")) {
+        object <- list(idx = Indices(object), dist = Distances(object))
+    }
+    if (!is.null(x = reduction.model)) {
+        if (verbose) {
+            message("Running UMAP projection")
+        }
+        umap.method <- "uwot-predict"
+    }
+    umap.output <- switch(EXPR = umap.method, `umap-learn` = {
+        if (!py_module_available(module = "umap")) {
+            stop("Cannot find UMAP, please install through pip (e.g. pip install umap-learn).")
+        }
+        if (!is.null(x = seed.use)) {
+            py_set_seed(seed = seed.use)
+        }
+        if (typeof(x = n.epochs) == "double") {
+            n.epochs <- as.integer(x = n.epochs)
+        }
+        umap_import <- import(module = "umap", delay_load = TRUE)
+        umap <- umap_import$UMAP(n_neighbors = as.integer(x = n.neighbors), 
+            n_components = as.integer(x = n.components), metric = metric, 
+            n_epochs = n.epochs, learning_rate = learning.rate, 
+            min_dist = min.dist, spread = spread, set_op_mix_ratio = set.op.mix.ratio, 
+            local_connectivity = local.connectivity, repulsion_strength = repulsion.strength, 
+            negative_sample_rate = negative.sample.rate, a = a, 
+            b = b, metric_kwds = metric.kwds, angular_rp_forest = angular.rp.forest, 
+            verbose = verbose)
+        umap$fit_transform(as.matrix(x = object))
+    }, uwot = {
+        if (metric == "correlation") {
+            warning("UWOT does not implement the correlation metric, using cosine instead", 
+                call. = FALSE, immediate. = TRUE)
+            metric <- "cosine"
+        }
+        if (is.list(x = object)) {
+            umap(X = NULL, nn_method = object, n_threads = nbrOfWorkers(), 
+                n_components = as.integer(x = n.components), 
+                metric = metric, n_epochs = n.epochs, learning_rate = learning.rate, 
+                min_dist = min.dist, spread = spread, set_op_mix_ratio = set.op.mix.ratio, 
+                local_connectivity = local.connectivity, repulsion_strength = repulsion.strength, 
+                negative_sample_rate = negative.sample.rate, 
+                a = a, b = b, fast_sgd = uwot.sgd, verbose = verbose, 
+                ret_model = return.model)
+        } else {
+            umap(X = object, n_threads = nbrOfWorkers(), n_neighbors = as.integer(x = n.neighbors), 
+                n_components = as.integer(x = n.components), 
+                metric = metric, n_epochs = n.epochs, learning_rate = learning.rate, 
+                min_dist = min.dist, spread = spread, set_op_mix_ratio = set.op.mix.ratio, 
+                local_connectivity = local.connectivity, repulsion_strength = repulsion.strength, 
+                negative_sample_rate = negative.sample.rate, 
+                a = a, b = b, fast_sgd = uwot.sgd, verbose = verbose, 
+                ret_model = return.model)
+        }
+    }, `uwot-predict` = {
+        if (metric == "correlation") {
+            warning("UWOT does not implement the correlation metric, using cosine instead", 
+                call. = FALSE, immediate. = TRUE)
+            metric <- "cosine"
+        }
+        if (is.null(x = reduction.model) || !inherits(x = reduction.model, 
+            what = "DimReduc")) {
+            stop("If running projection UMAP, please pass a DimReduc object with the model stored to reduction.model.", 
+                call. = FALSE)
+        }
+        model <- Misc(object = reduction.model, slot = "model")
+        if (length(x = model) == 0) {
+            stop("The provided reduction.model does not have a model stored. Please try running umot-learn on the object first", 
+                call. = FALSE)
+        }
+        if (is.list(x = object)) {
+            uwot::umap_transform(X = NULL, nn_method = object, 
+                model = model, n_threads = nbrOfWorkers(), n_epochs = n.epochs, 
+                verbose = verbose)
+        } else {
+            umap_transform(X = object, model = model, n_threads = nbrOfWorkers(), 
+                n_epochs = n.epochs, verbose = verbose)
+        }
+    }, stop("Unknown umap method: ", umap.method, call. = FALSE))
+    if (return.model) {
+#         umap.output$nn_index <- NULL
+        umap.model <- umap.output
+        umap.output <- umap.output$embedding
+    }
+    colnames(x = umap.output) <- paste0(reduction.key, 1:ncol(x = umap.output))
+    if (inherits(x = object, what = "dist")) {
+        rownames(x = umap.output) <- attr(x = object, "Labels")
+    }
+    else if (is.list(x = object)) {
+        rownames(x = umap.output) <- rownames(x = object$idx)
+    }
+    else {
+        rownames(x = umap.output) <- rownames(x = object)
+    }
+    umap.reduction <- CreateDimReducObject(embeddings = umap.output, 
+        key = reduction.key, assay = assay, global = TRUE)
+    if (return.model) {
+        Misc(umap.reduction, slot = "model") <- umap.model
+    }
+    return(umap.reduction)
+}
+
+
+environment(RunUMAP2) <- environment(Seurat:::RunUMAP.default)
+
+mapQuery <- function (exp_query, metadata_query, ref_obj, vars = NULL, verbose = TRUE, 
+    do_normalize = TRUE, do_umap = TRUE, sigma = 0.1, return_type = c('symphony', 'Seurat')) 
+{
+    if (return_type == 'Seurat') {
+        que <- Seurat::CreateSeuratObject(
+            counts=exp_query,
+            meta.data=metadata_query,
+            assay='SymphonyQuery'
+        )        
+    }
+    
+    if (do_normalize) {
+        if (verbose) 
+            message("Normalizing")
+        exp_query = normalizeData(exp_query, 10000, "log")
+    }
+    if (verbose) 
+        message("Scaling and synchronizing query gene expression")
+    idx_shared_genes = which(ref_obj$vargenes$symbol %in% rownames(exp_query))
+    shared_genes = ref_obj$vargenes$symbol[idx_shared_genes]
+    if (verbose) 
+        message("Found ", length(shared_genes), " reference variable genes in query dataset")
+    exp_query_scaled = scaleDataWithStats(exp_query[shared_genes, 
+        ], ref_obj$vargenes$mean[idx_shared_genes], ref_obj$vargenes$stddev[idx_shared_genes], 
+        1)
+    exp_query_scaled_sync = matrix(0, nrow = length(ref_obj$vargenes$symbol), 
+        ncol = ncol(exp_query))
+    exp_query_scaled_sync[idx_shared_genes, ] = exp_query_scaled
+    rownames(exp_query_scaled_sync) = ref_obj$vargenes$symbol
+    colnames(exp_query_scaled_sync) = colnames(exp_query)
+    if (verbose) 
+        message("Project query cells using reference gene loadings")
+    Z_pca_query = t(ref_obj$loadings) %*% exp_query_scaled_sync
+    if (verbose) 
+        message("Clustering query cells to reference centroids")
+    Z_pca_query_cos = cosine_normalize_cpp(Z_pca_query, 2)
+    R_query = soft_cluster(ref_obj$centroids, Z_pca_query_cos, 
+        sigma)
+    if (verbose) 
+        message("Correcting query batch effects")
+    if (!is.null(vars)) {
+        design = droplevels(metadata_query)[, vars] %>% as.data.frame()
+        onehot = design %>% purrr::map(function(.x) {
+            if (length(unique(.x)) == 1) {
+                rep(1, length(.x))
+            }
+            else {
+                stats::model.matrix(~0 + .x)
+            }
+        }) %>% purrr::reduce(cbind)
+        Xq = cbind(1, intercept = onehot) %>% t()
+    }
+    else {
+        Xq = Matrix(rbind(rep(1, ncol(Z_pca_query)), rep(1, ncol(Z_pca_query))), 
+            sparse = TRUE)
+    }
+    Zq_corr = moe_correct_ref(as.matrix(Z_pca_query), as.matrix(Xq), 
+        as.matrix(R_query), as.matrix(ref_obj$cache[[1]]), as.matrix(ref_obj$cache[[2]]))
+    colnames(Z_pca_query) = row.names(metadata_query)
+    rownames(Z_pca_query) = paste0("PC_", seq_len(nrow(Zq_corr)))
+    colnames(Zq_corr) = row.names(metadata_query)
+    rownames(Zq_corr) = paste0("harmony_", seq_len(nrow(Zq_corr)))
+    umap_query = NULL
+    if (do_umap & !is.null(ref_obj$save_uwot_path)) {
+        if (verbose) 
+            message("UMAP")
+        ref_umap_model = uwot::load_uwot(ref_obj$save_uwot_path, 
+            verbose = FALSE)
+        
+        ## UMAP may have been learned on subset of columns
+        umap_query = uwot::umap_transform(t(Zq_corr)[, 1:ref_umap_model$norig_col], ref_umap_model)
+#         umap_query = uwot::umap_transform(t(Zq_corr), ref_umap_model)
+        colnames(umap_query) = c("UMAP1", "UMAP2")
+        rownames(umap_query) <- row.names(metadata_query)
+    }
+    if (verbose) 
+        message("All done!")
+    
+    if (return_type == 'Seurat') {
+        que@assays$SymphonyQuery@data <- exp_query
+        que@assays$SymphonyQuery@scale.data <- exp_query_scaled_sync
+        que[['pca']] <- Seurat::CreateDimReducObject(
+            embeddings = t(Z_pca_query),
+            loadings = ref_obj$loadings, 
+            stdev = as.numeric(apply(Z_pca_query, 1, stats::sd)),
+            assay = 'SymphonyQuery',
+            key = 'pca_'
+        )
+        que[['harmony']] <- Seurat::CreateDimReducObject(
+            embeddings = t(Zq_corr),
+            stdev = as.numeric(apply(Zq_corr, 1, stats::sd)),
+            assay = 'SymphonyQuery',
+            key = 'harmony_',
+            misc=list(R=R_query)
+        )
+        que <- Seurat::ProjectDim(que, reduction = 'harmony', overwrite = TRUE, verbose = FALSE)
+        if (do_umap) {
+            que[['umap']] <- Seurat::CreateDimReducObject(
+                embeddings = umap_query,
+                assay = 'SymphonyQuery',
+                key = 'umap_'
+            )            
+        }
+        return(que)
+    } else if (return_type == 'symphony') {
+        return(list(Z = Zq_corr, Zq_pca = Z_pca_query, R = R_query, 
+            Xq = Xq, umap = umap_query, meta_data = metadata_query))
+    } else {
+        stop(glue('The return type = \"{return_type}\" is not available.'))
+    }
+    
+}
+
+environment(mapQuery) <- environment(symphony::mapQuery)
+
+knnPredict.Seurat <- function(query_obj, ref_obj, label_transfer, k = 5, confidence = TRUE, seed = 0) 
+{
+    set.seed(seed)
+    if (!label_transfer %in% colnames(ref_obj$meta_data)) {
+        stop('Label \"{label_transfer}\" is not available in the reference metadata.')
+    }
+    
+    if (confidence) {
+        knn_pred <- class::knn(t(ref_obj$Z_corr), Embeddings(query_obj, 'harmony'), 
+            ref_obj$meta_data[[label_transfer]], k = k, prob = TRUE)
+        knn_prob = attributes(knn_pred)$prob
+        query_obj@meta.data[[label_transfer]] <- knn_pred
+        query_obj@meta.data[paste0(label_transfer, '_prob')] = knn_prob
+    } else {
+        knn_pred <- class::knn(t(ref_obj$Z_corr), Embeddings(query_obj, 'harmony'), 
+            ref_obj$meta_data[[label_transfer]], k = k, prob = FALSE)
+        query_obj@meta.data[[label_transfer]] <- knn_pred
+    }
+    return(query_obj)
+}
+```
+
+```{r Creating Seuratobject}
+IE_dev_SCT <- SCTransform(IE_dev_filtered, assay = 'RNA', verbose = TRUE, variable.features.n = 5000) 
+obj_SCT = IE_dev_SCT %>%
+        RunPCA(npcs = 100, verbose = FALSE) %>%
+        RunHarmony.Seurat('experiment', assay.use = "SCT", 
+                          plot_convergence = TRUE) %>% 
+        FindNeighbors(dims = 1:30, reduction = 'harmony', verbose = FALSE) %>% 
+        FindClusters(resolution = 0.7, verbose = FALSE) 
+
+obj_SCT[['umap']] <- RunUMAP2(Embeddings(obj_SCT, 'harmony')[, 1:30], 
+                          assay='RNA', verbose=FALSE, umap.method='uwot', return.model=TRUE)
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(obj_SCT, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE) + 
+    guides(col=guide_legend(ncol = 2, override.aes = list(size=4))) +
+    labs(title = 'Reference (Clusters)')) + 
+(DimPlot(obj_SCT, reduction = 'umap', group.by = 'experiment', shuffle = TRUE) +
+    labs(title = 'Reference (Experiments)'))
+
+saveRDS(obj_SCT,"~/output/obj_SCT.rds")
+```
+
+## Symphony 
+### Creation of reference object
+```{r Reference object}
+obj_SCT_ref <- buildReferenceFromSeurat(obj_SCT, assay = 'SCT', 
+                        verbose=TRUE, save_umap=TRUE)
+saveRDS(obj_SCT_ref,"~/output/obj_SCT_ref.rds")
+```
+
+```{r}
+new.cluster.ids <- c("POM 1", "Cycling cells", "POM 2", "Dark cells", "POM 3","Neurons", "POM 4", "Chondrocytes", "POM 5", "Cochlear duct floor lateral", "Vestibular epithelial cells", "Glial cells 1","Cochlear duct floor medial", "Vestibular supporting cells 1", "Cochlear roof cells", "Transitional cells and endolymphatic sac/duct", "Vestibular roof cells", "Cochlear duct floor prosensory", "Hair cells", "Endothelial cells",  "Macrophages", "Vestibular supporting cells 2","Melanocytes","Glial cells 2")
+names(new.cluster.ids) <- levels(obj_SCT_ref)
+obj_SCT_ref <- RenameIdents(obj_SCT_ref, new.cluster.ids, colours(colors))
+```
+
+```{r Heatmap of differentially expressed genes between clusters}
+DefaultAssay(obj_SCT_ref) <- "RNA"
+obj_SCT_ref <- ScaleData(obj_SCT_ref)
+obj_RNA_visualisation.markers <- all_markers <-FindAllMarkers(obj_SCT_ref, 
+                             min.pct =  0.25, 
+                             min.diff.pct = 0.25)
+write.csv(obj_RNA_visualisation.markers, "~/output/obj_RNA_visualisation.markers_all.csv")
+
+top5.markers_RNA <- obj_RNA_visualisation.markers %>% group_by(cluster) %>% top_n(5, avg_log2FC)
+top5_heatmap_RNA <- DoHeatmap(object = obj_SCT_ref, features = top5.markers_RNA$gene, label = TRUE, size = .5) + scale_fill_viridis(option="mako")
+print(top5_heatmap_RNA)
+
+pdf("top5_heatmap_RNA.pdf", width = 32, height = 16)
+print(top5_heatmap_RNA)
+dev.off()
+jpeg("top5_heatmap_RNA.jpg", width = 7200, height = 4800)
+print(top5_heatmap_RNA)
+dev.off()
+```
+
+```{r Generate UMAP plots}
+obj_SCT_ref_dimplot <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot") & NoAxes() &NoLegend()
+pdf("obj_SCT_ref_dimplot.pdf", width = 6, height = 6)
+print(obj_SCT_ref_dimplot)
+dev.off()
+obj_SCT_ref_dimplot
+
+obj_SCT_ref_dimplot_jpg <- DimPlot(obj_SCT_ref, reduction = "umap",cols = DiscretePalette(44,palette = "stepped"), raster = FALSE, pt.size = 5) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot") & NoAxes() &NoLegend()
+obj_SCT_ref_dimplot
+jpeg("obj_SCT_ref_dimplot.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_dimplot_jpg)
+dev.off()
+
+obj_SCT_ref_dimplot_legend <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot") & NoAxes()
+pdf("obj_SCT_ref_dimplot_legend.pdf", width = 14, height = 8)
+print(obj_SCT_ref_dimplot_legend)
+dev.off()
+obj_SCT_ref_dimplot_legend
+
+obj_SCT_ref_dimplot_splitbyexperiment <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), split.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes()
+pdf("obj_SCT_ref_dimplot_splitbyexperiment.pdf", width = 20, height = 4)
+print(obj_SCT_ref_dimplot_splitbyexperiment)
+dev.off()
+obj_SCT_ref_dimplot_splitbyFW <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), split.by = "FW", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes()
+pdf("obj_SCT_ref_dimplot_splitbyFW.pdf", width = 19, height = 4)
+print(obj_SCT_ref_dimplot_splitbyFW)
+dev.off()
+obj_SCT_ref_dimplot_splitbyFoA <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), split.by = "FoA", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes()
+pdf("obj_SCT_ref_dimplot_splitbyFoA.pdf", width = 19, height = 4)
+print(obj_SCT_ref_dimplot_splitbyFoA)
+dev.off()
+
+obj_SCT_ref_dimplot_groupbyexperiment <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), group.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes()
+pdf("obj_SCT_ref_dimplot_groupbyexperiment.pdf", width = 7, height = 7)
+print(obj_SCT_ref_dimplot_groupbyexperiment)
+dev.off()
+obj_SCT_ref_dimplot_groupbyFW <- DimPlot(obj_SCT_ref, reduction = "umap", cols=c("#4d648d", "#11aac4", "#ff8b94", "#C49C94", "#990066"), group.by = "FW", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes()
+pdf("obj_SCT_ref_dimplot_groupbyFW.pdf", width = 7, height = 7)
+print(obj_SCT_ref_dimplot_groupbyFW)
+dev.off()
+obj_SCT_ref_dimplot_groupbyFoA <- DimPlot(obj_SCT_ref, reduction = "umap", cols=c("#4d648d", "#11aac4", "#ff8b94"), group.by = "FoA", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes()
+pdf("obj_SCT_ref_dimplot_groupbyFoA.pdf", width = 7, height = 7)
+print(obj_SCT_ref_dimplot_groupbyFoA)
+dev.off()
+obj_SCT_ref_dimplot_groupbytechnique <- DimPlot(obj_SCT_ref, reduction = "umap", cols=c("#4d648d", "#11aac4"), group.by = "technique", order = c("sn", "sc"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by technique") & NoAxes()
+pdf("obj_SCT_ref_dimplot_groupbytechnique.pdf", width = 7, height = 7)
+print(obj_SCT_ref_dimplot_groupbytechnique)
+dev.off()
+
+obj_SCT_ref_dimplot_pals <- DimPlot(obj_SCT_ref, reduction = "umap", pt.size = 5, raster=FALSE, cols = DiscretePalette(44,palette = "stepped"))+xlim(-10,16) +ylim(-15,15) & NoLegend() & NoAxes()
+
+jpeg("obj_SCT_ref_dimplot_pals.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_dimplot_pals)
+dev.off()
+
+obj_SCT_ref_dimplot_jpg_splitbyexperiment <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), pt.size = 5, split.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_splitbyexperiment.jpg", width = 10000, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_splitbyexperiment)
+dev.off()
+obj_SCT_ref_dimplot_jpg_splitbyFW <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), pt.size = 5, split.by = "FW", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_splitbyFW.jpg", width = 10000, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_splitbyFW)
+dev.off()
+obj_SCT_ref_dimplot_jpg_splitbyFoA <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), pt.size = 5, split.by = "FoA", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_splitbyFoA.jpg", width = 6000, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_splitbyFoA)
+dev.off()
+obj_SCT_ref_dimplot_jpg_splitbytechnique <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), pt.size = 5, split.by = "technique", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by technique") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_splitbytechnique.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_splitbytechnique)
+dev.off()
+
+obj_SCT_ref_dimplot_jpg_groupbyexperiment <- DimPlot(obj_SCT_ref, reduction = "umap", cols = DiscretePalette(44,palette = "stepped"), pt.size = 5, group.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_groupbyexperiment.jpg", width = 2100, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_groupbyexperiment)
+dev.off()
+obj_SCT_ref_dimplot_jpg_groupbyFW <- DimPlot(obj_SCT_ref, reduction = "umap", cols=c("#4d648d", "#11aac4", "#ff8b94", "#C49C94", "#990066"), pt.size = 5, group.by = "FW", order = c("04i10", "H1 and 04i10", "WTC"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_groupbyFW.jpg", width = 2100, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_groupbyFW)
+dev.off()
+obj_SCT_ref_dimplot_jpg_groupbyFoA <- DimPlot(obj_SCT_ref, reduction = "umap", cols=c("#4d648d", "#11aac4", "#ff8b94", "#C49C94", "#990066"), pt.size = 5, group.by = "FoA", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_groupbyFoA.jpg", width = 1400, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_groupbyFoA)
+dev.off()
+obj_SCT_ref_dimplot_jpg_groupbytechnique <- DimPlot(obj_SCT_ref, reduction = "umap", cols=c("#4d648d", "#11aac4"), pt.size = 5, group.by = "technique", order = c("sn", "sc"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by technique") & NoAxes()
+jpeg("obj_SCT_ref_dimplot_jpg_groupbytechnique.jpg", width = 700, height = 2400)
+print(obj_SCT_ref_dimplot_jpg_groupbytechnique)
+dev.off()
+```
+
+#### Creating simple reference object
+```{r}
+new.cluster.ids <- c("POM", "Cycling cells", "POM", "Dark cells", "POM","Neurons", "POM", "Chondrocytes", "POM", "Cochlear duct floor lateral", "Vestibular epithelial cells", "Glial cells","Cochlear duct floor medial", "Vestibular supporting cells", "Cochlear roof cells", "Transitional cells and endolymphatic sac/duct", "Vestibular roof cells", "Cochlear duct floor prosensory", "Hair cells", "Endothelial cells",  "Macrophages", "Vestibular supporting cells","Melanocytes","Glial cells")
+
+names(new.cluster.ids) <- levels(obj_SCT_ref)
+obj_SCT_ref_simple <- RenameIdents(obj_SCT_ref, new.cluster.ids, colours(colors))
+```
+
+```{r Save obj_SCT_ref_simple with new simple annotations}
+saveRDS(obj_SCT_ref_simple, "~/output/obj_SCT_ref_simple.rds")
+```
+
+```{r Setup colors for plotting}
+colors_simple<-c("#0450fb", "#e81f3f", "#2ca02c",  "#9eccaf", "#4d648d","#973e00", "#aec7e8", "#ccaf00", "#ca5300", "#42e8f3","#fd6900", "#0ecedb", "#098a93", "#ff8631", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70")
+```
+
+```{r Generate UMAP plots}
+obj_SCT_ref_simple_dimplot <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, raster = FALSE)+xlim(-10,16) +ylim(-15,15) & NoAxes() &NoLegend()
+pdf("obj_SCT_ref_simple_dimplot.pdf", width = 6, height = 6)
+print(obj_SCT_ref_simple_dimplot)
+dev.off()
+obj_SCT_ref_simple_dimplot
+
+obj_SCT_ref_simple_dimplot_jpg <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, raster = FALSE, pt.size = 5) +xlim(-10,16) +ylim(-15,15) & NoAxes() &NoLegend()
+obj_SCT_ref_simple_dimplot_jpg
+jpeg("obj_SCT_ref_simple_dimplot_jpg.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg)
+dev.off()
+
+obj_SCT_ref_simple_dimplot_splitbyexperiment <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, split.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_splitbyexperiment.pdf", width = 40, height = 4)
+print(obj_SCT_ref_simple_dimplot_splitbyexperiment)
+dev.off()
+obj_SCT_ref_simple_dimplot_splitbyFW <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, split.by = "FW", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_splitbyFW.pdf", width = 19, height = 4)
+print(obj_SCT_ref_simple_dimplot_splitbyFW)
+dev.off()
+obj_SCT_ref_simple_dimplot_splitbyFoA <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, split.by = "FoA", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_splitbyFoA.pdf", width = 19, height = 4)
+print(obj_SCT_ref_simple_dimplot_splitbyFoA)
+dev.off()
+obj_SCT_ref_simple_dimplot_splitbytechnique <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, split.by = "technique", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by technique") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_splitbytechnique.pdf", width = 13, height = 4)
+print(obj_SCT_ref_simple_dimplot_splitbytechnique)
+dev.off()
+
+obj_SCT_ref_simple_dimplot_groupbyexperiment <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, group.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_groupbyexperiment.pdf", width = 7, height = 7)
+print(obj_SCT_ref_simple_dimplot_groupbyexperiment)
+dev.off()
+obj_SCT_ref_simple_dimplot_groupbyFW <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=c("#4d648d", "#11aac4", "#ff8b94", "#C49C94", "#990066"), group.by = "FW", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_groupbyFW.pdf", width = 7, height = 7)
+print(obj_SCT_ref_simple_dimplot_groupbyFW)
+dev.off()
+obj_SCT_ref_simple_dimplot_groupbyFoA <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=c("#4d648d", "#11aac4", "#ff8b94"), group.by = "FoA", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_groupbyFoA.pdf", width = 7, height = 7)
+print(obj_SCT_ref_simple_dimplot_groupbyFoA)
+dev.off()
+obj_SCT_ref_simple_dimplot_groupbytechnique <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=c("#4d648d", "#11aac4"), group.by = "technique", order = c("sn", "sc"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by technique") & NoAxes()
+pdf("obj_SCT_ref_simple_dimplot_groupbytechnique.pdf", width = 7, height = 7)
+print(obj_SCT_ref_simple_dimplot_groupbytechnique)
+dev.off()
+
+obj_SCT_ref_simple_dimplot_jpg_splitbyexperiment <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, pt.size = 5, split.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes()
+jpeg("obj_SCT_ref_simple_dimplot_jpg_splitbyexperiment.jpg", width = 8000, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_splitbyexperiment)
+dev.off()
+obj_SCT_ref_simple_dimplot_jpg_splitbyFW <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, pt.size = 5, split.by = "FW", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes()
+jpeg("obj_SCT_ref_simple_dimplot_jpg_splitbyFW.jpg", width = 8000, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_splitbyFW)
+dev.off()
+obj_SCT_ref_simple_dimplot_jpg_splitbyFoA <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, pt.size = 5, split.by = "FoA", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes()
+jpeg("obj_SCT_ref_simple_dimplot_jpg_splitbyFoA.jpg", width = 5000, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_splitbyFoA)
+dev.off()
+obj_SCT_ref_simple_dimplot_jpg_splitbytechnique <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, pt.size = 5, split.by = "technique", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by technique") & NoAxes()
+jpeg("obj_SCT_ref_simple_dimplot_jpg_splitbytechnique.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_splitbytechnique)
+dev.off()
+
+obj_SCT_ref_simple_dimplot_jpg_groupbyexperiment <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=colors_simple, pt.size = 5, group.by = "experiment", raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by batch") & NoAxes() & NoLegend()
+jpeg("obj_SCT_ref_simple_dimplot_jpg_groupbyexperiment.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_groupbyexperiment)
+dev.off()
+
+obj_SCT_ref_simple_dimplot_jpg_groupbyFW <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=c("#4d648d", "#11aac4", "#2ca02c", "#990066", "#f9ae34"), pt.size = 5, group.by = "FW", order = c("doublet", "H1", "04i", "WTC_GCaMP","WTC_SOX2"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by age") & NoAxes() & NoLegend()
+obj_SCT_ref_simple_dimplot_jpg_groupbyFW
+jpeg("obj_SCT_ref_simple_dimplot_jpg_groupbyFW.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_groupbyFW)
+dev.off()
+
+obj_SCT_ref_simple_dimplot_jpg_groupbyFoA <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=c("#4d648d", "#2ca02c", "#990066"), pt.size = 5, group.by = "FoA", order = c("d110", "d100", "d75"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by source") & NoAxes() & NoLegend()
+jpeg("obj_SCT_ref_simple_dimplot_jpg_groupbyFoA.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_groupbyFoA)
+dev.off()
+
+obj_SCT_ref_simple_dimplot_jpg_groupbytechnique <- DimPlot(obj_SCT_ref_simple, reduction = "umap", cols=c("#4d648d", "#2ca02c"), pt.size = 5, group.by = "technique", order = c("sn", "sc"), raster = FALSE) +xlim(-10,16) +ylim(-15,15)+ ggtitle("UMAP plot split by technique") & NoAxes() & NoLegend()
+jpeg("obj_SCT_ref_simple_dimplot_jpg_groupbytechnique.jpg", width = 2400, height = 2400)
+print(obj_SCT_ref_simple_dimplot_jpg_groupbytechnique)
+dev.off()
+```
+
+## Cluster analysis 
+```{r Cluster analysis}
+obj_SCT_ref_simple_analyses <- obj_SCT_ref_simple
+
+table.cluster.experiment <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$experiment)
+freq.cluster.experiment <- table.cluster.experiment / rowSums(table.cluster.experiment) 
+freq.experiment.cluster <- sweep(table.cluster.experiment, 2, colSums(table.cluster.experiment), '/')
+freq.experiment.cluster
+
+table.cluster.technique <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$technique)
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique)
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+
+table.cluster.FoA <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$FoA)
+freq.cluster.FoA <- table.cluster.FoA / rowSums(table.cluster.FoA) 
+freq.FoA.cluster <- sweep(table.cluster.FoA, 2, colSums(table.cluster.FoA), '/')
+
+table.cluster.FW <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$FW)
+freq.cluster.FW <- table.cluster.FW / rowSums(table.cluster.FW) 
+freq.FW.cluster <- sweep(table.cluster.FW, 2, colSums(table.cluster.FW), '/')
+
+
+freq.experiment <- prop.table(colSums(table.cluster.experiment))
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.FoA <- prop.table(colSums(table.cluster.FoA))
+freq.FW <- prop.table(colSums(table.cluster.FW))
+freq.cluster <- prop.table(rowSums(table.cluster.experiment)) 
+freq.experiment
+freq.technique
+freq.FoA
+freq.FW
+freq.cluster
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each experiment _simple}
+df_experiment_obj <- as.data.frame.matrix(freq.experiment.cluster) 
+df_experiment_obj["cluster"] <- rownames(df_experiment_obj)
+
+df_experiment_obj <- df_experiment_obj[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+df_experiment_obj <- gather(df_experiment_obj, "experiment", "frequency", c(1:(ncol(df_experiment_obj)-1)))
+df_experiment_obj$cluster <- factor(df_experiment_obj$cluster, levels = unique(df_experiment_obj$cluster)) 
+df_experiment_obj_plot_legend <- ggplot(data = df_experiment_obj) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))  
+pdf("df_experiment_obj_plot_legend.pdf", width = 7, height = 7)
+print(df_experiment_obj_plot_legend)
+dev.off()
+df_experiment_obj_plot_legend
+
+df_experiment_obj_plot <- ggplot(data = df_experiment_obj) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))     & NoAxes() & NoLegend()
+pdf("df_experiment_obj_plot.pdf", width = 7, height = 7)
+print(df_experiment_obj_plot)
+dev.off()
+jpeg("df_experiment_obj_plot.jpg", width = 1200, height = 1200)
+print(df_experiment_obj_plot)
+dev.off()
+df_experiment_obj_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each technique _simple}
+df_technique <- as.data.frame.matrix(freq.technique.cluster) 
+df_technique["cluster"] <- rownames(df_technique)
+
+df_technique <- df_technique[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+df_technique <- gather(df_technique, "technique", "frequency", c(1:(ncol(df_technique)-1)))
+df_technique$cluster <- factor(df_technique$cluster, levels = unique(df_technique$cluster)) 
+df_technique_plot_legend <- ggplot(data = df_technique) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))      
+pdf("df_technique_plot_legend.pdf", width = 7, height = 7)
+print(df_technique_plot_legend)
+dev.off()
+df_technique_plot_legend
+
+df_technique_plot <- ggplot(data = df_technique) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))     & NoAxes() & NoLegend()
+pdf("df_technique_plot.pdf", width = 7, height = 7)
+print(df_technique_plot)
+dev.off()
+jpeg("df_technique_plot.jpg", width = 1200, height = 1200)
+print(df_technique_plot)
+dev.off()
+df_technique_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each FoA _simple}
+df_FoA <- as.data.frame.matrix(freq.FoA.cluster) 
+df_FoA["cluster"] <- rownames(df_FoA)
+
+df_FoA <- df_FoA[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+
+df_FoA <- gather(df_FoA, "FoA", "frequency", c(1:(ncol(df_FoA)-1)))
+df_FoA$cluster <- factor(df_FoA$cluster, levels = unique(df_FoA$cluster)) 
+df_FoA <- mutate(df_FoA, FoA = fct_relevel(FoA, "d75", "d100","d110"))
+df_FoA_plot_legend <- ggplot(data = df_FoA) + geom_bar(mapping = aes(x = FoA, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))      
+pdf("df_FoA_plot_legend.pdf", width = 7, height = 7)
+print(df_FoA_plot_legend)
+dev.off()
+df_FoA_plot_legend
+
+
+df_FoA_plot <- ggplot(data = df_FoA) + geom_bar(mapping = aes(x = FoA, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))     & NoAxes() & NoLegend()
+pdf("df_FoA_plot.pdf", width = 7, height = 7)
+print(df_FoA_plot)
+dev.off() 
+jpeg("df_FoA_plot.jpg", width = 1200, height = 1200)
+print(df_FoA_plot)
+dev.off() 
+df_FoA_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each FW _simple}
+df_FW <- as.data.frame.matrix(freq.FW.cluster) 
+df_FW["cluster"] <- rownames(df_FW)
+
+df_FW <- df_FW[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+
+df_FW <- gather(df_FW, "FW", "frequency", c(1:(ncol(df_FW)-1)))
+df_FW$cluster <- factor(df_FW$cluster, levels = unique(df_FW$cluster)) 
+df_FW <- mutate(df_FW, FW = fct_relevel(FW, "WTC_GCaMP", "WTC_SOX2","04i", "H1", "doublet"))
+df_FW_plot_legend <- ggplot(data = df_FW) + geom_bar(mapping = aes(x = FW, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))      
+pdf("df_FW_plot_legend.pdf", width = 7, height = 7)
+print(df_FW_plot_legend)
+dev.off()
+df_FW_plot_legend
+
+
+df_FW_plot <- ggplot(data = df_FW) + geom_bar(mapping = aes(x = FW, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#4d648d","#0450fb", "#9eccaf", "#ccaf00", "#ca5300", "#973e00", "#ff8631","#fd6900", "#2ca02c", "#42e8f3", "#098a93", "#aec7e8", "#0ecedb", "#f9ae34", "#ffd3b6", "#ae34f9", "#ba4c70", "#e81f3f"))     & NoAxes() & NoLegend()
+pdf("df_FW_plot.pdf", width = 7, height = 7)
+print(df_FW_plot)
+dev.off() 
+jpeg("df_FW_plot.jpg", width = 1200, height = 1200)
+print(df_FW_plot)
+dev.off() 
+df_FW_plot
+```
+
+#### Marker gene expression
+```{r}
+plotdens_CDH1 <- plot_density(obj_SCT_ref, "CDH1", legend_title = "CDH1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_CDH1.jpg", width = 2400, height = 2400)
+print(plotdens_CDH1)
+dev.off()
+plotdens_EPCAM <- plot_density(obj_SCT_ref, "EPCAM", legend_title = "EPCAM", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_EPCAM.jpg", width = 2400, height = 2400)
+print(plotdens_EPCAM)
+dev.off()
+plotdens_PRRX1 <- plot_density(obj_SCT_ref, "PRRX1", legend_title = "PRRX1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PRRX1.jpg", width = 2400, height = 2400)
+print(plotdens_PRRX1)
+dev.off()
+plotdens_OC90 <- plot_density(obj_SCT_ref, "OC90", legend_title = "OC90", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_OC90.jpg", width = 2400, height = 2400)
+print(plotdens_OC90)
+dev.off()
+plotdens_PRPH <- plot_density(obj_SCT_ref, "PRPH", legend_title = "PRPH", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PRPH.jpg", width = 2400, height = 2400)
+print(plotdens_PRPH)
+dev.off()
+plotdens_MLANA <- plot_density(obj_SCT_ref, "MLANA", legend_title = "MLANA", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_MLANA.jpg", width = 2400, height = 2400)
+print(plotdens_MLANA)
+dev.off()
+plotdens_MPZ <- plot_density(obj_SCT_ref, "MPZ", legend_title = "MPZ", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_MPZ.jpg", width = 2400, height = 2400)
+print(plotdens_MPZ)
+dev.off()
+plotdens_PECAM1 <- plot_density(obj_SCT_ref, "PECAM1", legend_title = "PECAM1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PECAM1.jpg", width = 2400, height = 2400)
+print(plotdens_PECAM1)
+dev.off()
+plotdens_PTPRC <- plot_density(obj_SCT_ref, "PTPRC", legend_title = "PTPRC", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PTPRC.jpg", width = 2400, height = 2400)
+print(plotdens_PTPRC)
+dev.off()
+plotdens_STRC <- plot_density(obj_SCT_ref, "STRC", legend_title = "STRC", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_STRC.jpg", width = 2400, height = 2400)
+print(plotdens_STRC)
+dev.off()
+plotdens_MKI67 <- plot_density(obj_SCT_ref, "MKI67", legend_title = "MKI67", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_MKI67.jpg", width = 2400, height = 2400)
+print(plotdens_MKI67)
+dev.off()
+plotdens_ACAN <- plot_density(obj_SCT_ref, "ACAN", legend_title = "ACAN", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_ACAN.jpg", width = 2400, height = 2400)
+print(plotdens_ACAN)
+dev.off()
+plotdens_SOX9 <- plot_density(obj_SCT_ref, "SOX9", legend_title = "SOX9", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_SOX9.jpg", width = 2400, height = 2400)
+print(plotdens_SOX9)
+dev.off()
+plotdens_PRPH <- plot_density(obj_SCT_ref, "PRPH", legend_title = "PRPH", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PRPH.jpg", width = 2400, height = 2400)
+print(plotdens_PRPH)
+dev.off()
+plotdens_TLR2 <- plot_density(obj_SCT_ref, "TLR2", legend_title = "TLR2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_TLR2.jpg", width = 2400, height = 2400)
+print(plotdens_TLR2)
+dev.off()
+plotdens_COCH <- plot_density(obj_SCT_ref, "COCH", legend_title = "COCH", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_COCH.jpg", width = 2400, height = 2400)
+print(plotdens_COCH)
+dev.off()
+plotdens_MKI67 <- plot_density(obj_SCT_ref, "MKI67", legend_title = "MKI67", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_MKI67.jpg", width = 2400, height = 2400)
+print(plotdens_MKI67)
+dev.off()
+plotdens_PRRX1 <- plot_density(obj_SCT_ref, "PRRX1", legend_title = "PRRX1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PRRX1.jpg", width = 2400, height = 2400)
+print(plotdens_PRRX1)
+dev.off()
+plotdens_SOX2 <- plot_density(obj_SCT_ref, "SOX2", legend_title = "SOX2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_SOX2.jpg", width = 2400, height = 2400)
+print(plotdens_SOX2)
+dev.off()
+plotdens_KCNE1 <- plot_density(obj_SCT_ref, "KCNE1", legend_title = "KCNE1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_KCNE1.jpg", width = 2400, height = 2400)
+print(plotdens_KCNE1)
+dev.off()
+plotdens_MYO6 <- plot_density(obj_SCT_ref, "MYO6", legend_title = "MYO6", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_MYO6.jpg", width = 2400, height = 2400)
+print(plotdens_MYO6)
+dev.off()
+plotdens_DCN <- plot_density(obj_SCT_ref, "DCN", legend_title = "DCN", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_DCN.jpg", width = 2400, height = 2400)
+print(plotdens_DCN)
+dev.off()
+plotdens_GPC3 <- plot_density(obj_SCT_ref, "GPC3", legend_title = "GPC3", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_GPC3.jpg", width = 2400, height = 2400)
+print(plotdens_GPC3)
+dev.off()
+plotdens_PTPRC <- plot_density(obj_SCT_ref, "PTPRC", legend_title = "PTPRC", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PTPRC.jpg", width = 2400, height = 2400)
+print(plotdens_PTPRC)
+dev.off()
+plotdens_COL3A1 <- plot_density(obj_SCT_ref, "COL3A1", legend_title = "COL3A1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_COL3A1.jpg", width = 2400, height = 2400)
+print(plotdens_COL3A1)
+dev.off()
+plotdens_POU3F4 <- plot_density(obj_SCT_ref, "POU3F4", legend_title = "POU3F4", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_POU3F4.jpg", width = 2400, height = 2400)
+print(plotdens_POU3F4)
+dev.off()
+plotdens_TBX18 <- plot_density(obj_SCT_ref, "TBX18", legend_title = "TBX18", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_TBX18.jpg", width = 2400, height = 2400)
+print(plotdens_TBX18)
+dev.off()
+plotdens_LMX1A <- plot_density(obj_SCT_ref, "LMX1A", legend_title = "LMX1A", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_LMX1A.jpg", width = 2400, height = 2400)
+print(plotdens_LMX1A)
+dev.off()
+plotdens_DPT <- plot_density(obj_SCT_ref, "DPT", legend_title = "DPT", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_DPT.jpg", width = 2400, height = 2400)
+print(plotdens_DPT)
+dev.off()
+plotdens_GATA2 <- plot_density(obj_SCT_ref, "GATA2", legend_title = "GATA2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_GATA2.jpg", width = 2400, height = 2400)
+print(plotdens_GATA2)
+dev.off()
+plotdens_OTX1 <- plot_density(obj_SCT_ref, "OTX1", legend_title = "OTX1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_OTX1.jpg", width = 2400, height = 2400)
+print(plotdens_OTX1)
+dev.off()
+plotdens_OTX2 <- plot_density(obj_SCT_ref, "OTX2", legend_title = "OTX2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_OTX2.jpg", width = 2400, height = 2400)
+print(plotdens_OTX2)
+dev.off()
+plotdens_FGF9 <- plot_density(obj_SCT_ref, "FGF9", legend_title = "FGF9", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_FGF9.jpg", width = 2400, height = 2400)
+print(plotdens_FGF9)
+dev.off()
+plotdens_BMP4 <- plot_density(obj_SCT_ref, "BMP4", legend_title = "BMP4", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_BMP4.jpg", width = 2400, height = 2400)
+print(plotdens_BMP4)
+dev.off()
+plotdens_GATA3 <- plot_density(obj_SCT_ref, "GATA3", legend_title = "GATA3", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_GATA3.jpg", width = 2400, height = 2400)
+print(plotdens_GATA3)
+dev.off()
+plotdens_SPARCL1 <- plot_density(obj_SCT_ref, "SPARCL1", legend_title = "SPARCL1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_SPARCL1.jpg", width = 2400, height = 2400)
+print(plotdens_SPARCL1)
+dev.off()
+plotdens_LGR5 <- plot_density(obj_SCT_ref, "LGR5", legend_title = "LGR5", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_LGR5.jpg", width = 2400, height = 2400)
+print(plotdens_LGR5)
+dev.off()
+plotdens_CSF1R <- plot_density(obj_SCT_ref, "CSF1R", legend_title = "CSF1R", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_CSF1R.jpg", width = 2400, height = 2400)
+print(plotdens_CSF1R)
+dev.off()
+plotdens_DACH2 <- plot_density(obj_SCT_ref, "DACH2", legend_title = "DACH2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_DACH2.jpg", width = 2400, height = 2400)
+print(plotdens_DACH2)
+dev.off()
+plotdens_FGF10 <- plot_density(obj_SCT_ref, "FGF10", legend_title = "FGF10", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_FGF10.jpg", width = 2400, height = 2400)
+print(plotdens_FGF10)
+dev.off()
+plotdens_OTOR <- plot_density(obj_SCT_ref, "OTOR", legend_title = "OTOR", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_OTOR.jpg", width = 2400, height = 2400)
+print(plotdens_OTOR)
+dev.off()
+plotdens_CRYM <- plot_density(obj_SCT_ref, "CRYM", legend_title = "CRYM", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_CRYM.jpg", width = 2400, height = 2400)
+print(plotdens_CRYM)
+dev.off()
+plotdens_ZPLD1 <- plot_density(obj_SCT_ref, "ZPLD1", legend_title = "ZPLD1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_ZPLD1.jpg", width = 2400, height = 2400)
+print(plotdens_ZPLD1)
+dev.off()
+plotdens_ATP1A1 <- plot_density(obj_SCT_ref, "ATP1A1", legend_title = "ATP1A1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_ATP1A1.jpg", width = 2400, height = 2400)
+print(plotdens_ATP1A1)
+dev.off()
+plotdens_ATP1B2 <- plot_density(obj_SCT_ref, "ATP1B2", legend_title = "ATP1B2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_ATP1B2.jpg", width = 2400, height = 2400)
+print(plotdens_ATP1B2)
+dev.off()
+plotdens_SPP1 <- plot_density(obj_SCT_ref, "SPP1", legend_title = "SPP1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_SPP1.jpg", width = 2400, height = 2400)
+print(plotdens_SPP1)
+dev.off()
+plotdens_GPC3 <- plot_density(obj_SCT_ref, "GPC3", legend_title = "GPC3", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_GPC3.jpg", width = 2400, height = 2400)
+print(plotdens_GPC3)
+dev.off()
+plotdens_WNT3 <- plot_density(obj_SCT_ref, "WNT3", legend_title = "WNT3", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_WNT3.jpg", width = 2400, height = 2400)
+print(plotdens_WNT3)
+dev.off()
+plotdens_TUBB3 <- plot_density(obj_SCT_ref, "TUBB3", legend_title = "TUBB3", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_TUBB3.jpg", width = 2400, height = 2400)
+print(plotdens_TUBB3)
+dev.off()
+plotdens_P2RX3 <- plot_density(obj_SCT_ref, "P2RX3", legend_title = "P2RX3", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_P2RX3.jpg", width = 2400, height = 2400)
+print(plotdens_P2RX3)
+dev.off()
+plotdens_NEFM <- plot_density(obj_SCT_ref, "NEFM", legend_title = "NEFM", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_NEFM.jpg", width = 2400, height = 2400)
+print(plotdens_NEFM)
+dev.off()
+plotdens_NEFL <- plot_density(obj_SCT_ref, "NEFL", legend_title = "NEFL", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_NEFL.jpg", width = 2400, height = 2400)
+print(plotdens_NEFL)
+dev.off()
+plotdens_RORB <- plot_density(obj_SCT_ref, "RORB", legend_title = "RORB", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_RORB.jpg", width = 2400, height = 2400)
+print(plotdens_RORB)
+dev.off()
+plotdens_TECTA <- plot_density(obj_SCT_ref, "TECTA", legend_title = "TECTA", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_TECTA.jpg", width = 2400, height = 2400)
+print(plotdens_TECTA)
+dev.off()
+plotdens_TECTB <- plot_density(obj_SCT_ref, "TECTB", legend_title = "TECTB", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_TECTB.jpg", width = 2400, height = 2400)
+print(plotdens_TECTB)
+dev.off()
+plotdens_OTOGL <- plot_density(obj_SCT_ref, "OTOGL", legend_title = "OTOGL", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_OTOGL.jpg", width = 2400, height = 2400)
+print(plotdens_OTOGL)
+dev.off()
+plotdens_MEIS2 <- plot_density(obj_SCT_ref, "MEIS2", legend_title = "MEIS2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_MEIS2.jpg", width = 2400, height = 2400)
+print(plotdens_MEIS2)
+dev.off()
+plotdens_ADAMTSL1 <- plot_density(obj_SCT_ref, "ADAMTSL1", legend_title = "ADAMTSL1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_ADAMTSL1.jpg", width = 2400, height = 2400)
+print(plotdens_ADAMTSL1)
+dev.off()
+plotdens_WNT2B <- plot_density(obj_SCT_ref, "WNT2B", legend_title = "WNT2B", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_WNT2B.jpg", width = 2400, height = 2400)
+print(plotdens_WNT2B)
+dev.off()
+plotdens_SLC26A4 <- plot_density(obj_SCT_ref, "SLC26A4", legend_title = "SLC26A4", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_SLC26A4.jpg", width = 2400, height = 2400)
+print(plotdens_SLC26A4)
+dev.off()
+plotdens_DACH1 <- plot_density(obj_SCT_ref, "DACH1", legend_title = "DACH1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_DACH1.jpg", width = 2400, height = 2400)
+print(plotdens_DACH1)
+dev.off()
+plotdens_ROR1 <- plot_density(obj_SCT_ref, "ROR1", legend_title = "ROR1", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_ROR1.jpg", width = 2400, height = 2400)
+print(plotdens_ROR1)
+dev.off()
+plotdens_PAX8 <- plot_density(obj_SCT_ref, "PAX8", legend_title = "PAX8", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PAX8.jpg", width = 2400, height = 2400)
+print(plotdens_PAX8)
+dev.off()
+plotdens_PAX2 <- plot_density(obj_SCT_ref, "PAX2", legend_title = "PAX2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_PAX2.jpg", width = 2400, height = 2400)
+print(plotdens_PAX2)
+dev.off()
+plotdens_SOX2 <- plot_density(obj_SCT_ref, "SOX2", legend_title = "SOX2", pal = "inferno", size = 10)  & NoAxes() & NoLegend()
+jpeg("plotdens_SOX2.jpg", width = 2400, height = 2400)
+print(plotdens_SOX2)
+dev.off()
+```
+
+#### Volcanoplot cochlear duct floor versus vestibular supporting cells
+References for cochlear versus vestibular markers: Yamamoto, R. (2021, Dev. Biol.) and Wilkerson, B.A. (2021, Elife)
+```{r}
+cochductVSvestsup_markers <- FindMarkers(obj_SCT_ref, ident.1 = c("Cochlear duct floor lateral", "Cochlear duct floor medial", "Cochlear duct floor prosensory"), ident.2 = c("Vestibular supporting cells 1", "Vestibular supporting cells 2"))
+head(cochductVSvestsup_markers)
+
+cochductVSvestsup_volcano <- EnhancedVolcano(cochductVSvestsup_markers,
+    lab = rownames(cochductVSvestsup_markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = 10e-100,
+    FCcutoff = 0.5,
+    pointSize = 10,
+    labSize = 15,
+    col=c('gray','gray','gray','red3'),
+    colAlpha = 0.5,
+    drawConnectors = TRUE,
+    widthConnectors = 0.25) &NoLegend()
+jpeg("cochductVSvestsup_volcano.jpg", width = 1600, height = 1600)
+print(cochductVSvestsup_volcano)
+dev.off()
+
+cochductVSvestsup_volcano_noAxes <- EnhancedVolcano(cochductVSvestsup_markers,
+    lab = rownames(cochductVSvestsup_markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    pCutoff = 10e-100,
+    FCcutoff = 0.5,
+    pointSize = 10,
+    labSize = 10,
+    boxedLabels = TRUE,
+    col=c('gray','gray','gray','red3'),
+    colAlpha = 0.5,
+    drawConnectors = TRUE,
+    widthConnectors = 1) &NoLegend() &NoAxes()
+jpeg("cochductVSvestsup_volcano_noAxes.jpg", width = 800, height = 1200)
+print(cochductVSvestsup_volcano_noAxes)
+dev.off()
+
+cochductVSvestsup_volcano_noAxespdf_Yamamotococh <- EnhancedVolcano(cochductVSvestsup_markers,
+    lab = rownames(cochductVSvestsup_markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    selectLab = c('SULF1','RORB','PAX2',
+      'GPC5','DACH1','TRAPPC9','NR2F1','ITIH5','PRDM16'),
+    pCutoff = 10e-100,
+    FCcutoff = 0.5,
+    pointSize = 5,
+    labSize = 5,
+    boxedLabels = FALSE,
+    col=c('gray','gray','gray','red3'),
+    colAlpha = 0.5,
+    drawConnectors = TRUE,
+    widthConnectors = 1) &NoLegend() &NoAxes()
+pdf("cochductVSvestsup_volcano_noAxespdf_Yamamotococh.pdf", width = 15, height = 15)
+print(cochductVSvestsup_volcano_noAxespdf_Yamamotococh)
+dev.off()
+
+cochductVSvestsup_volcano_noAxespdf_Yamamotovest <- EnhancedVolcano(cochductVSvestsup_markers,
+    lab = rownames(cochductVSvestsup_markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    selectLab = c('ADAMTSL1','PDE4B','CESER1',
+      'NPAS3','ERBB4','EFNA5','CTNNA2','SH3GL2','ZFP536','NTF3','PTPRT','EBF3','PLXNA4','GAS1'),
+    pCutoff = 10e-100,
+    FCcutoff = 0.5,
+    pointSize = 5,
+    labSize = 5,
+    boxedLabels = FALSE,
+    col=c('gray','gray','gray','red3'),
+    colAlpha = 0.5,
+    drawConnectors = TRUE,
+    widthConnectors = 1) &NoLegend() &NoAxes()
+pdf("cochductVSvestsup_volcano_noAxespdf_Yamamotovest.pdf", width = 15, height = 15)
+print(cochductVSvestsup_volcano_noAxespdf_Yamamotovest)
+dev.off()
+
+cochductVSvestsup_volcano_noAxespdf_Wilkersoncoch <- EnhancedVolcano(cochductVSvestsup_markers,
+    lab = rownames(cochductVSvestsup_markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    selectLab = c('KCNJ13','LMOD3','GATA3',
+      'SMOC2','SMAGP','CA14','TECTA','TECTB'),
+    pCutoff = 10e-100,
+    FCcutoff = 0.5,
+    pointSize = 5,
+    labSize = 5,
+    boxedLabels = FALSE,
+    col=c('gray','gray','gray','red3'),
+    colAlpha = 0.5,
+    drawConnectors = TRUE,
+    widthConnectors = 1) &NoLegend() &NoAxes()
+pdf("cochductVSvestsup_volcano_noAxespdf_Wilkersoncoch.pdf", width = 15, height = 15)
+print(cochductVSvestsup_volcano_noAxespdf_Wilkersoncoch)
+dev.off()
+
+cochductVSvestsup_volcano_noAxespdf_Wilkersonves <- EnhancedVolcano(cochductVSvestsup_markers,
+    lab = rownames(cochductVSvestsup_markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    selectLab = c('CIB3','PCDH20','S100A1',
+      'ZPLD1','AGR3','BRICD5','MEIS2'),
+    pCutoff = 10e-100,
+    FCcutoff = 0.5,
+    pointSize = 5,
+    labSize = 5,
+    boxedLabels = FALSE,
+    col=c('gray','gray','gray','red3'),
+    colAlpha = 0.5,
+    drawConnectors = TRUE,
+    widthConnectors = 1) &NoLegend() &NoAxes()
+pdf("cochductVSvestsup_volcano_noAxespdf_Wilkersonves.pdf", width = 15, height = 15)
+print(cochductVSvestsup_volcano_noAxespdf_Wilkersonves)
+dev.off()
+
+cochductVSvestsup_volcano_noAxespdf_nolabel <- EnhancedVolcano(cochductVSvestsup_markers,
+    lab = rownames(cochductVSvestsup_markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    selectLab = c("MYO7A"),
+    pCutoff = 10e-100,
+    FCcutoff = 0.5,
+    pointSize = 5,
+    labSize = 5,
+    boxedLabels = FALSE,
+    col=c('gray','gray','gray','red3'),
+    colAlpha = 0.5,
+    drawConnectors = TRUE,
+    widthConnectors = 1) &NoLegend() &NoAxes()
+pdf("cochductVSvestsup_volcano_noAxespdf_nolabel.pdf", width = 6, height = 5)
+print(cochductVSvestsup_volcano_noAxespdf_nolabel)
+dev.off()
+```
+
+#### Dotplot of cell type/domain specific markers
+```{r Dotplot}
+IEO_subdotplot_coch <- subset(obj_SCT_ref_simple, idents = c("Cochlear duct floor prosensory", "Cochlear duct floor medial", "Cochlear duct floor lateral",  "Cochlear roof cells")) 
+levels(IEO_subdotplot_coch) <- c("Cochlear roof cells",  "Cochlear duct floor lateral", "Cochlear duct floor medial", "Cochlear duct floor prosensory")
+IEO_subdotplot_vest <- subset(obj_SCT_ref_simple, idents = c("Vestibular supporting cells", "Vestibular epithelial cells", "Vestibular roof cells", "Dark cells"))
+IEO_subdotplot_HC <- subset(obj_SCT_ref, idents = "Hair cells")
+IEO_subdotplot_vestandHC <- subset(obj_SCT_ref_simple, idents = c("Vestibular supporting cells", "Vestibular epithelial cells", "Vestibular roof cells", "Dark cells", "Hair cells"))
+levels(IEO_subdotplot_vestandHC) <- c("Hair cells","Dark cells","Vestibular roof cells","Vestibular epithelial cells","Vestibular supporting cells")
+
+dotplot_genes_coch <- c("RORB", "TECTA", "TECTB", "LGR5","SOX2", "FGF20","FGF10", "JAG1", "BMP4","GATA3", "OTX2", "FGF9")
+dotplot_coch <- DotPlot(object = IEO_subdotplot_coch, features = dotplot_genes_coch) + scale_colour_viridis(option = "viridis") + RotatedAxis()
+dotplot_coch
+
+dotplot_genes_vest <- c("MEIS2","ADAMTSL1","OTOGL", "USH1C", "NTN1","SMOC2", "WNT3", "KCNE1","ATP1B2", "SPP1")
+dotplot_vest <- DotPlot(object = IEO_subdotplot_vest, features = dotplot_genes_vest)+ scale_colour_viridis(option = "viridis") + RotatedAxis()
+dotplot_vest
+
+dotplot_genes_HC <- c("STRC","OTOF","MYO6", "USH2A", "MYO15A") 
+dotplot_HC <- DotPlot(object = IEO_subdotplot_HC, features = dotplot_genes_HC) + scale_colour_viridis(option = "viridis") + RotatedAxis()
+dotplot_HC
+
+dotplot_genes_vestandHC <- c("MEIS2","ADAMTSL1","OTOGL", "USH1C", "NTN1","SMOC2", "WNT3", "KCNE1","ATP1B2", "SPP1", "STRC","OTOF","USH2A", "MYO15A")
+dotplot_vestandHC <- DotPlot(object = IEO_subdotplot_vestandHC, features = dotplot_genes_vestandHC) + scale_colour_viridis(option = "viridis") + RotatedAxis()
+dotplot_vestandHC
+```
+
+```{r}
+plotdens_epi_query_TECTA <- plot_density(query_epi, "TECTA", legend_title = "TECTA", pal = "inferno", size = 15) +xlim(0,12) +ylim(-8,10) & NoAxes() & NoLegend()
+jpeg("plotdens_epi_query_TECTA.jpg", width = 1200, height = 1200)
+print(plotdens_epi_query_TECTA)
+dev.off()
+
+plotdens_epi_query_FGF10 <- plot_density(query_epi, "FGF10", legend_title = "FGF10", pal = "inferno", size = 15) +xlim(0,12) +ylim(-8,10) & NoAxes() & NoLegend()
+jpeg("plotdens_epi_query_FGF10.jpg", width = 1200, height = 1200)
+print(plotdens_epi_query_FGF10)
+dev.off()
+
+plotdens_epi_query_WNT2B <- plot_density(query_epi, "WNT2B", legend_title = "WNT2B", pal = "inferno", size = 15) +xlim(0,12) +ylim(-8,10) & NoAxes() & NoLegend()
+jpeg("plotdens_epi_query_WNT2B.jpg", width = 1200, height = 1200)
+print(plotdens_epi_query_WNT2B)
+dev.off()
+```
+
+```{r}
+pdf("dotplot_vestandHC.pdf", width = 8, height = 2.5)
+print(dotplot_vestandHC)
+dev.off()
+pdf("dotplot_coch.pdf", width = 7.5, height = 1.9)
+print(dotplot_coch)
+dev.off()
+```
+
+#### Cell population distribution 
+```{r Generate tables containing information on technique, age, FoA and batch, both absolute (talbe.cluster.xxx) and relative (freq.cluster.xxx) obj_SCT_ref_simple}
+obj_SCT_ref_simple_analyses <- obj_SCT_ref_simple
+
+table.cluster.experiment <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$experiment)
+freq.cluster.experiment <- table.cluster.experiment / rowSums(table.cluster.experiment) 
+freq.experiment.cluster <- sweep(table.cluster.experiment, 2, colSums(table.cluster.experiment), '/')
+freq.experiment.cluster
+
+table.cluster.technique <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$technique)
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique)
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+
+table.cluster.FoA <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$FoA)
+freq.cluster.FoA <- table.cluster.FoA / rowSums(table.cluster.FoA) 
+freq.FoA.cluster <- sweep(table.cluster.FoA, 2, colSums(table.cluster.FoA), '/')
+
+table.cluster.FW <- table(obj_SCT_ref_simple_analyses@active.ident, obj_SCT_ref_simple_analyses@meta.data$FW)
+freq.cluster.FW <- table.cluster.FW / rowSums(table.cluster.FW) 
+freq.FW.cluster <- sweep(table.cluster.FW, 2, colSums(table.cluster.FW), '/')
+
+freq.experiment <- prop.table(colSums(table.cluster.experiment))
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.FoA <- prop.table(colSums(table.cluster.FoA))
+freq.FW <- prop.table(colSums(table.cluster.FW))
+freq.cluster <- prop.table(rowSums(table.cluster.experiment)) 
+freq.experiment
+freq.technique
+freq.FoA
+freq.FW
+freq.cluster
+```
+
+```{r}
+colors_simple = c("POM" = "#0450fb", 
+              "Cycling cells" = "#e81f3f",
+              "Dark cells" = "#2ca02c", 
+              "Neurons" = "#9eccaf",
+              "Chondrocytes" = "#4d648d",
+              "Cochlear duct floor lateral" = "#973e00",
+              "Vestibular epithelial cells" = "#aec7e8",
+              "Glial cells" = "#ccaf00", 
+              "Cochlear duct floor medial" = "#ca5300",
+              "Vestibular supporting cells" = "#42e8f3",
+              "Cochlear roof cells" = "#fd6900", 
+              "Transitional cells and endolymphatic sac/duct" = "#0ecedb",
+              "Vestibular roof cells" = "#098a93",
+              "Cochlear duct floor prosensory" = "#ff8631",
+              "Hair cells" = "#f9ae34", 
+              "Endothelial cells" = "#ffd3b6",
+              "Macrophages" = "#ae34f9",
+              "Melanocytes" = "#ba4c70")
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each experiment obj_SCT_ref_simple}
+df_experiment_obj <- as.data.frame.matrix(freq.experiment.cluster) 
+df_experiment_obj["cluster"] <- rownames(df_experiment_obj)
+
+df_experiment_obj <- df_experiment_obj[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+df_experiment_obj <- gather(df_experiment_obj, "experiment", "frequency", c(1:(ncol(df_experiment_obj)-1)))
+df_experiment_obj$cluster <- factor(df_experiment_obj$cluster, levels = unique(df_experiment_obj$cluster)) 
+df_experiment_obj_plot_legend <- ggplot(data = df_experiment_obj) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =colors_simple)
+pdf("df_experiment_obj_plot_legend.pdf", width = 7, height = 7)
+print(df_experiment_obj_plot_legend)
+dev.off()
+df_experiment_obj_plot_legend
+
+df_experiment_obj_plot <- ggplot(data = df_experiment_obj) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_simple)     & NoAxes() & NoLegend()
+pdf("df_experiment_obj_plot.pdf", width = 7, height = 7)
+print(df_experiment_obj_plot)
+dev.off()
+jpeg("df_experiment_obj_plot.jpg", width = 1200, height = 1200)
+print(df_experiment_obj_plot)
+dev.off()
+df_experiment_obj_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each technique obj_SCT_ref_simple}
+df_technique_obj <- as.data.frame.matrix(freq.technique.cluster) 
+df_technique_obj["cluster"] <- rownames(df_technique_obj)
+
+df_technique_obj <- df_technique_obj[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+df_technique_obj <- gather(df_technique_obj, "technique", "frequency", c(1:(ncol(df_technique_obj)-1)))
+df_technique_obj$cluster <- factor(df_technique_obj$cluster, levels = unique(df_technique_obj$cluster)) 
+df_technique_obj_plot_legend <- ggplot(data = df_technique_obj) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =colors_simple)
+pdf("df_technique_obj_plot_legend.pdf", width = 7, height = 7)
+print(df_technique_obj_plot_legend)
+dev.off()
+df_technique_obj_plot_legend
+
+df_technique_obj_plot <- ggplot(data = df_technique_obj) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_simple)     & NoAxes() & NoLegend()
+pdf("df_technique_obj_plot.pdf", width = 7, height = 7)
+print(df_technique_obj_plot)
+dev.off()
+jpeg("df_technique_obj_plot.jpg", width = 1200, height = 1200)
+print(df_technique_obj_plot)
+dev.off()
+df_technique_obj_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each FoA obj_SCT_ref_simple}
+df_FoA_obj <- as.data.frame.matrix(freq.FoA.cluster) 
+df_FoA_obj["cluster"] <- rownames(df_FoA_obj)
+
+df_FoA_obj <- df_FoA_obj[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+df_FoA_obj <- gather(df_FoA_obj, "FoA", "frequency", c(1:(ncol(df_FoA_obj)-1)))
+df_FoA_obj$cluster <- factor(df_FoA_obj$cluster, levels = unique(df_FoA_obj$cluster)) 
+df_FoA_obj_plot_legend <- ggplot(data = df_FoA_obj) + geom_bar(mapping = aes(x = FoA, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =colors_simple)
+pdf("df_FoA_obj_plot_legend.pdf", width = 7, height = 7)
+print(df_FoA_obj_plot_legend)
+dev.off()
+df_FoA_obj_plot_legend
+
+df_FoA_obj_plot <- ggplot(data = df_FoA_obj) + geom_bar(mapping = aes(x = FoA, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_simple)     & NoAxes() & NoLegend()
+pdf("df_FoA_obj_plot.pdf", width = 7, height = 7)
+print(df_FoA_obj_plot)
+dev.off()
+jpeg("df_FoA_obj_plot.jpg", width = 1200, height = 1200)
+print(df_FoA_obj_plot)
+dev.off()
+df_FoA_obj_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each FW obj_SCT_ref_simple}
+df_FW_obj <- as.data.frame.matrix(freq.FW.cluster) 
+df_FW_obj["cluster"] <- rownames(df_FW_obj)
+
+df_FW_obj <- df_FW_obj[c("Chondrocytes","POM","Neurons", "Glial cells","Cochlear duct floor medial","Cochlear duct floor lateral","Cochlear duct floor prosensory","Cochlear roof cells","Dark cells","Vestibular supporting cells","Vestibular roof cells", "Vestibular epithelial cells","Transitional cells and endolymphatic sac/duct","Hair cells","Endothelial cells","Macrophages","Melanocytes","Cycling cells"),]
+
+df_FW_obj <- gather(df_FW_obj, "FW", "frequency", c(1:(ncol(df_FW_obj)-1)))
+df_FW_obj$cluster <- factor(df_FW_obj$cluster, levels = unique(df_FW_obj$cluster)) 
+df_FW_obj_plot_legend <- ggplot(data = df_FW_obj) + geom_bar(mapping = aes(x = FW, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =colors_simple)
+pdf("df_FW_obj_plot_legend.pdf", width = 7, height = 7)
+print(df_FW_obj_plot_legend)
+dev.off()
+df_FW_obj_plot_legend
+
+df_FW_obj_plot <- ggplot(data = df_FW_obj) + geom_bar(mapping = aes(x = FW, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_simple)     & NoAxes() & NoLegend()
+pdf("df_FW_obj_plot.pdf", width = 7, height = 7)
+print(df_FW_obj_plot)
+dev.off()
+jpeg("df_FW_obj_plot.jpg", width = 1200, height = 1200)
+print(df_FW_obj_plot)
+dev.off()
+df_FW_obj_plot
+```
+
+#### Large groups
+```{r new clusters for largegroup}
+obj_SCT_ref_largeroups <- obj_SCT_ref
+new.cluster.ids_largegroup <- c("Mesenchymal", "Cycling", "Mesenchymal", "Epithelial", "Mesenchymal", "Neuroectodermal", "Mesenchymal", "Mesenchymal", "Mesenchymal", "Epithelial", "Epithelial", "Neuroectodermal", "Epithelial", "Epithelial", "Epithelial", "Epithelial", "Epithelial", "Epithelial", "Epithelial", "Endothelial", "Other", "Epithelial", "Neuroectodermal","Neuroectodermal")
+names(new.cluster.ids_largegroup) <- levels(obj_SCT_ref_largeroups)
+obj_SCT_ref_largeroups <- RenameIdents(obj_SCT_ref_largeroups, new.cluster.ids_largegroup)
+```
+
+```{r Save ccmiri_PCA30_UMAP_7 with new annotations for largegroup}
+saveRDS(obj_SCT_ref_largeroups, "~/output/obj_SCT_ref_largeroups.rds")
+```
+
+```{r Generate tables containing information on technique, cell line, timepoint and batch, both absolute (talbe.cluster.xxx) and relative (freq.cluster.xxx) _largegroup}
+obj_SCT_ref_simple_analyses_large <- obj_SCT_ref_largeroups
+
+table.cluster.experiment_largegroup <- table(obj_SCT_ref_simple_analyses_large@active.ident, obj_SCT_ref_simple_analyses_large@meta.data$experiment)
+freq.cluster.experiment_largegroup <- table.cluster.experiment_largegroup / rowSums(table.cluster.experiment_largegroup) 
+freq.experiment.cluster_largegroup <- sweep(table.cluster.experiment_largegroup, 2, colSums(table.cluster.experiment_largegroup), '/')
+
+table.cluster.technique_largegroup <- table(obj_SCT_ref_simple_analyses_large@active.ident, obj_SCT_ref_simple_analyses_large@meta.data$technique)
+freq.cluster.technique_largegroup <- table.cluster.technique_largegroup / rowSums(table.cluster.technique_largegroup)
+freq.technique.cluster_largegroup <- sweep(table.cluster.technique_largegroup, 2, colSums(table.cluster.technique_largegroup), '/')
+
+table.cluster.FW_largegroup <- table(obj_SCT_ref_simple_analyses_large@active.ident, obj_SCT_ref_simple_analyses_large@meta.data$FW)
+freq.cluster.FW_largegroup <- table.cluster.FW_largegroup / rowSums(table.cluster.FW_largegroup) 
+freq.FW.cluster_largegroup <- sweep(table.cluster.FW_largegroup, 2, colSums(table.cluster.FW_largegroup), '/')
+
+table.cluster.FoA_largegroup <- table(obj_SCT_ref_simple_analyses_large@active.ident, obj_SCT_ref_simple_analyses_large@meta.data$FoA)
+freq.cluster.FoA_largegroup <- table.cluster.FoA_largegroup / rowSums(table.cluster.FoA_largegroup) 
+freq.FoA.cluster_largegroup <- sweep(table.cluster.FoA_largegroup, 2, colSums(table.cluster.FoA_largegroup), '/')
+
+freq.experiment_largegroup <- prop.table(colSums(table.cluster.experiment_largegroup))
+freq.technique_largegroup  <- prop.table(colSums(table.cluster.technique_largegroup))
+freq.FW_largegroup  <- prop.table(colSums(table.cluster.FW_largegroup))
+freq.FoA_largegroup  <- prop.table(colSums(table.cluster.FoA_largegroup))
+freq.experiment_largegroup 
+freq.technique_largegroup 
+freq.FW_largegroup 
+freq.FoA_largegroup 
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each experiment _largegroup}
+df_experiment_obj_largegroup <- as.data.frame.matrix(freq.experiment.cluster_largegroup) 
+df_experiment_obj_largegroup["cluster"] <- rownames(df_experiment_obj_largegroup)
+
+df_experiment_obj_largegroup <- df_experiment_obj_largegroup[c("Mesenchymal", "Epithelial", "Neuroectodermal", "Endothelial", "Other", "Cycling"),]
+
+df_experiment_obj_largegroup <- gather(df_experiment_obj_largegroup, "experiment", "frequency", c(1:(ncol(df_experiment_obj_largegroup)-1)))
+df_experiment_obj_largegroup$cluster <- factor(df_experiment_obj_largegroup$cluster, levels = unique(df_experiment_obj_largegroup$cluster)) 
+df_experiment_obj_largegroup_plot_legend <- ggplot(data = df_experiment_obj_largegroup) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =  c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))
+pdf("df_experiment_obj_largegroup_plot_legend.pdf", width = 7, height = 7)
+print(df_experiment_obj_largegroup_plot_legend)
+dev.off()
+df_experiment_obj_largegroup_plot_legend
+
+df_experiment_obj_largegroup_plot <- ggplot(data = df_experiment_obj_largegroup) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))   & NoAxes() & NoLegend()
+pdf("df_experiment_obj_largegroup_plot.pdf", width = 7, height = 7)
+print(df_experiment_obj_largegroup_plot)
+dev.off()
+jpeg("df_experiment_obj_largegroup_plot.jpg", width = 1200, height = 1200)
+print(df_experiment_obj_largegroup_plot)
+dev.off()
+df_experiment_obj_largegroup_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each FoA _largegroup}
+df_FoA_obj_largegroup <- as.data.frame.matrix(freq.FoA.cluster_largegroup) 
+df_FoA_obj_largegroup["cluster"] <- rownames(df_FoA_obj_largegroup)
+
+df_FoA_obj_largegroup <- df_FoA_obj_largegroup[c("Mesenchymal", "Epithelial", "Neuroectodermal", "Endothelial", "Other", "Cycling"),]
+
+df_FoA_obj_largegroup <- gather(df_FoA_obj_largegroup, "FoA", "frequency", c(1:(ncol(df_FoA_obj_largegroup)-1)))
+df_FoA_obj_largegroup$cluster <- factor(df_FoA_obj_largegroup$cluster, levels = unique(df_FoA_obj_largegroup$cluster)) 
+df_FoA_obj_largegroup_plot_legend <- ggplot(data = df_FoA_obj_largegroup) + geom_bar(mapping = aes(x = FoA, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =  c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))
+pdf("df_FoA_obj_largegroup_plot_legend.pdf", width = 7, height = 7)
+print(df_FoA_obj_largegroup_plot_legend)
+dev.off()
+df_FoA_obj_largegroup_plot_legend
+
+df_FoA_obj_largegroup_plot <- ggplot(data = df_FoA_obj_largegroup) + geom_bar(mapping = aes(x = FoA, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))   & NoAxes() & NoLegend()
+pdf("df_FoA_obj_largegroup_plot.pdf", width = 7, height = 7)
+print(df_FoA_obj_largegroup_plot)
+dev.off()
+jpeg("df_FoA_obj_largegroup_plot.jpg", width = 1200, height = 1200)
+print(df_FoA_obj_largegroup_plot)
+dev.off()
+df_FoA_obj_largegroup_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each FW _largegroup}
+df_FW_obj_largegroup <- as.data.frame.matrix(freq.FW.cluster_largegroup) 
+df_FW_obj_largegroup["cluster"] <- rownames(df_FW_obj_largegroup)
+
+df_FW_obj_largegroup <- df_FW_obj_largegroup[c("Mesenchymal", "Epithelial", "Neuroectodermal", "Endothelial", "Other", "Cycling"),]
+
+df_FW_obj_largegroup <- gather(df_FW_obj_largegroup, "FW", "frequency", c(1:(ncol(df_FW_obj_largegroup)-1)))
+df_FW_obj_largegroup$cluster <- factor(df_FW_obj_largegroup$cluster, levels = unique(df_FW_obj_largegroup$cluster)) 
+df_FW_obj_largegroup_plot_legend <- ggplot(data = df_FW_obj_largegroup) + geom_bar(mapping = aes(x = FW, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =  c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))
+pdf("df_FW_obj_largegroup_plot_legend.pdf", width = 7, height = 7)
+print(df_FW_obj_largegroup_plot_legend)
+dev.off()
+df_FW_obj_largegroup_plot_legend
+
+df_FW_obj_largegroup_plot <- ggplot(data = df_FW_obj_largegroup) + geom_bar(mapping = aes(x = FW, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))   & NoAxes() & NoLegend()
+pdf("df_FW_obj_largegroup_plot.pdf", width = 7, height = 7)
+print(df_FW_obj_largegroup_plot)
+dev.off()
+jpeg("df_FW_obj_largegroup_plot.jpg", width = 1200, height = 1200)
+print(df_FW_obj_largegroup_plot)
+dev.off()
+df_FW_obj_largegroup_plot
+```
+
+```{r Bar plot of frequency of cell clusters found wihtin each technique _largegroup}
+df_technique_obj_largegroup <- as.data.frame.matrix(freq.technique.cluster_largegroup) 
+df_technique_obj_largegroup["cluster"] <- rownames(df_technique_obj_largegroup)
+
+df_technique_obj_largegroup <- df_technique_obj_largegroup[c("Mesenchymal", "Epithelial", "Neuroectodermal", "Endothelial", "Other", "Cycling"),]
+
+df_technique_obj_largegroup <- gather(df_technique_obj_largegroup, "technique", "frequency", c(1:(ncol(df_technique_obj_largegroup)-1)))
+df_technique_obj_largegroup$cluster <- factor(df_technique_obj_largegroup$cluster, levels = unique(df_technique_obj_largegroup$cluster)) 
+df_technique_obj_largegroup_plot_legend <- ggplot(data = df_technique_obj_largegroup) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values =  c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))
+pdf("df_technique_obj_largegroup_plot_legend.pdf", width = 7, height = 7)
+print(df_technique_obj_largegroup_plot_legend)
+dev.off()
+df_technique_obj_largegroup_plot_legend
+
+df_technique_obj_largegroup_plot <- ggplot(data = df_technique_obj_largegroup) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = c("#141414", "#3d3d3d", "#666666", "#8f8f8f","#b8b8b8","#e2e2e2"))   & NoAxes() & NoLegend()
+pdf("df_technique_obj_largegroup_plot.pdf", width = 7, height = 7)
+print(df_technique_obj_largegroup_plot)
+dev.off()
+jpeg("df_technique_obj_largegroup_plot.jpg", width = 1200, height = 1200)
+print(df_technique_obj_largegroup_plot)
+dev.off()
+df_technique_obj_largegroup_plot
+```
+
+#### Dimplot every age separate
+```{r Subset timepoints}
+W7 <- subset(obj_SCT_ref_simple, subset =FW == "7")
+W7_dimplot <- DimPlot(W7, reduction = "umap", cols=colors_simple, raster = FALSE, pt.size = 5) +xlim(-10,16) +ylim(-15,15) + ggtitle("W7") & NoAxes() &NoLegend()
+pdf("W7_dimplot.pdf", width = 6, height = 6)
+print(W7_dimplot)
+dev.off()
+W7_dimplot
+jpeg("W7_dimplot.jpg", width = 2400, height = 2400)
+print(W7_dimplot)
+dev.off()
+
+W9 <- subset(obj_SCT_ref_simple, subset =FW == "9")
+W9_dimplot <- DimPlot(W9, reduction = "umap", cols=colors_simple, raster = FALSE, pt.size = 5) +xlim(-10,16) +ylim(-15,15) + ggtitle("W9") & NoAxes() &NoLegend()
+pdf("W9_dimplot.pdf", width = 6, height = 6)
+print(W9_dimplot)
+dev.off()
+W9_dimplot
+jpeg("W9_dimplot.jpg", width = 2400, height = 2400)
+print(W9_dimplot)
+dev.off()
+
+adult <- subset(obj_SCT_ref_simple, subset =FW == "adult")
+adult_dimplot <- DimPlot(adult, reduction = "umap", cols=colors_simple, raster = FALSE, pt.size = 5) +xlim(-10,16) +ylim(-15,15) + ggtitle("adult") & NoAxes() &NoLegend()
+pdf("adult_dimplot.pdf", width = 6, height = 6)
+print(adult_dimplot)
+dev.off()
+adult_dimplot
+jpeg("adult_dimplot.jpg", width = 2400, height = 2400)
+print(adult_dimplot)
+dev.off()
+```
+
+### Showing integration for epithelium, POM and HC separate
+```{r Reference object subsets}
+obj_SCT_epi <- subset(obj_SCT, idents = c("9", "3","17", "13","21", "10","14", "12","15", "16"))
+obj_SCT_POM <-subset(obj_SCT, idents = c("0", "2","4", "6","8"))
+obj_SCT_HC <- subset(obj_SCT, idents = c("18"))
+```
+
+```{r Load data for query}
+IEO_SCT_ccmiri_PCA30_UMAP_7 <- readRDS("~/data/IEO_SCT_ccmiri_PCA30_UMAP_7.rds")
+```
+
+```{r Query subsets}
+query_epi <- subset(IEO_SCT_ccmiri_PCA30_UMAP_7, idents = "7")
+query_POM <- subset(IEO_SCT_ccmiri_PCA30_UMAP_7, idents = "16")
+query_HC <- subset(IEO_SCT_ccmiri_PCA30_UMAP_7, idents = "28")
+```
+
+```{r mapQuery for subsets}
+query_epi <- mapQuery(
+    query_epi$SCT@scale.data, 
+    query_epi@meta.data, 
+    obj_SCT_ref,
+    vars = 'experiment', 
+    do_normalize = FALSE,
+    return_type = 'Seurat')
+
+query_POM <- mapQuery(
+    query_POM$SCT@scale.data, 
+    query_POM@meta.data, 
+    obj_SCT_ref,
+    vars = 'experiment', 
+    do_normalize = FALSE,
+    return_type = 'Seurat')
+
+query_HC <- mapQuery(
+    query_HC$SCT@scale.data, 
+    query_HC@meta.data, 
+    obj_SCT_ref,
+    vars = 'experiment', 
+    do_normalize = FALSE,
+    return_type = 'Seurat')
+```
+
+```{r UMAP of mapped subsets}
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(obj_SCT_epi, reduction = 'umap', shuffle = TRUE)  +xlim(0,12) +ylim(-8,10) + labs(title = 'Original Reference (Clusters)')) + 
+(DimPlot(query_epi, reduction = 'umap', shuffle = TRUE)  +xlim(0,12) +ylim(-8,10) + labs(title = 'Mapped Query (Donors)'))
+
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(obj_SCT_POM, reduction = 'umap', shuffle = TRUE)+xlim(-10,0) +ylim(-2,10) + labs(title = 'Original Reference (Clusters)')) + 
+(DimPlot(query_POM, reduction = 'umap', shuffle = TRUE)+ xlim(-10,0) +ylim(-2,10)+ labs(title = 'Mapped Query (Donors)'))
+
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(obj_SCT_HC, reduction = 'umap', shuffle = TRUE) +xlim(13,16) +ylim(-6,-3) + labs(title = 'Original Reference (Clusters)')) + 
+(DimPlot(query_HC, reduction = 'umap', shuffle = TRUE)+xlim(13,16) +ylim(-6,-3)  + labs(title = 'Mapped Query (Donors)'))
+```
+
+```{r Prediction of cell cluster per subset}
+query_epi_pred <- knnPredict.Seurat(query_epi, obj_SCT_ref, 'seurat_clusters')
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(obj_SCT_epi, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE) +xlim(0,12) +ylim(-8,10)+ labs(title = 'Original Epithelial')) +
+(DimPlot(query_epi_pred, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE) +xlim(0,12) +ylim(-8,10)+ labs(title = 'Mapped Epithelial (sc and sn)'))
+
+query_POM_pred <- knnPredict.Seurat(query_POM, obj_SCT_ref, 'seurat_clusters')
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(obj_SCT_POM, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE)+xlim(-10,0) +ylim(-2,10)+ labs(title = 'Original POM')) +
+(DimPlot(query_POM_pred, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE)+xlim(-10,0) +ylim(-2,10)+ labs(title = 'Mapped POM (scn and sn)'))
+
+query_HC_pred <- knnPredict.Seurat(query_HC, obj_SCT_ref, 'seurat_clusters')
+options(repr.plot.height = 4, repr.plot.width = 10)
+(DimPlot(obj_SCT_HC, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE)+xlim(13,16) +ylim(-6,-3)+ labs(title = 'Original HCs')) +
+(DimPlot(query_HC_pred, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE)+xlim(13,16) +ylim(-6,-3)+ labs(title = 'Mapped HCs (sc and sn)'))
+```
+
+```{r Save created files}
+saveRDS(query_epi, "~/output/query_epi.rds")
+saveRDS(query_POM, "~/output/query_POM.rds")
+saveRDS(query_HC, "~/output/query_HC.rds")
+saveRDS(obj_SCT_epi, "~/output/obj_SCT_epi.rds")
+saveRDS(obj_SCT_POM, "~/output/obj_SCT_POM.rds")
+saveRDS(obj_SCT_HC, "~/output/obj_SCT_HC.rds")
+```
+
+```{r Color palette}
+colors_numbered = c("0" = "#0450fb", 
+              "1" = "#e81f3f",
+              "2" = "#0450fb",
+              "3" = "#2ca02c", 
+              "4" = "#0450fb",
+              "5" = "#9eccaf",
+              "6" = "#0450fb", 
+              "7" = "#4d648d",
+              "8" = "#0450fb", 
+              "9" = "#973e00",
+              "10" = "#aec7e8",
+              "11" = "#ccaf00", 
+              "12" = "#ca5300",
+              "13" = "#42e8f3",
+              "14" = "#fd6900", 
+              "15" = "#0ecedb",
+              "16" = "#098a93",
+              "17" = "#ff8631",
+              "18" = "#f9ae34", 
+              "19" = "#ffd3b6",
+              "20" = "#ae34f9",
+              "21" = "#42e8f3", 
+              "22" = "#ba4c70",
+              "23" = "#ccaf00")
+
+```
+
+```{r Create mapped UMAPs}
+obj_SCT_epi_dimplot <- DimPlot(obj_SCT_epi, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE, cols = colors_numbered, pt.size = 15, raster = FALSE) +xlim(0,12) +ylim(-8,10) & NoAxes() &NoLegend()
+pdf("obj_SCT_epi_dimplot.pdf", width = 6, height = 6)
+print(obj_SCT_epi_dimplot)
+dev.off()
+obj_SCT_epi_dimplot
+jpeg("obj_SCT_epi_dimplot.jpg", width = 2400, height = 2400)
+print(obj_SCT_epi_dimplot)
+dev.off()
+
+query_epi_pred_dimplot <- DimPlot(query_epi_pred, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE, cols = colors_numbered, pt.size = 15, raster = FALSE) +xlim(0,12) +ylim(-8,10) & NoAxes() &NoLegend()
+pdf("query_epi_pred_dimplot.pdf", width = 6, height = 6)
+print(query_epi_pred_dimplot)
+dev.off()
+query_epi_pred_dimplot
+jpeg("query_epi_pred_dimplot.jpg", width = 2400, height = 2400)
+print(query_epi_pred_dimplot)
+dev.off()
+
+obj_SCT_POM_dimplot <- DimPlot(obj_SCT_POM, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE, cols = colors_numbered, pt.size = 15, raster = FALSE) +xlim(-10,0) +ylim(-2,10) & NoAxes() &NoLegend()
+pdf("obj_SCT_POM_dimplot.pdf", width = 6, height = 6)
+print(obj_SCT_POM_dimplot)
+dev.off()
+obj_SCT_POM_dimplot
+jpeg("obj_SCT_POM_dimplot.jpg", width = 2400, height = 2400)
+print(obj_SCT_POM_dimplot)
+dev.off()
+
+query_POM_pred_dimplot <- DimPlot(query_POM_pred, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE, cols = colors_numbered, pt.size = 15, raster = FALSE) +xlim(-10,0) +ylim(-2,10) & NoAxes() &NoLegend()
+pdf("query_POM_pred_dimplot.pdf", width = 6, height = 6)
+print(query_POM_pred_dimplot)
+dev.off()
+query_POM_pred_dimplot
+jpeg("query_POM_pred_dimplot.jpg", width = 2400, height = 2400)
+print(query_POM_pred_dimplot)
+dev.off()
+
+obj_SCT_HC_dimplot <- DimPlot(obj_SCT_HC, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE, cols = colors_numbered, pt.size = 15, raster = FALSE) +xlim(13,16) +ylim(-6,-3) & NoAxes() &NoLegend()
+pdf("obj_SCT_HC_dimplot.pdf", width = 6, height = 6)
+print(obj_SCT_HC_dimplot)
+dev.off()
+obj_SCT_HC_dimplot
+jpeg("obj_SCT_HC_dimplot.jpg", width = 2400, height = 2400)
+print(obj_SCT_HC_dimplot)
+dev.off()
+
+query_HC_pred_dimplot <- DimPlot(query_HC_pred, reduction = 'umap', group.by = 'seurat_clusters', shuffle = TRUE, cols = colors_numbered, pt.size = 15, raster = FALSE) +xlim(13,16) +ylim(-6,-3) & NoAxes() &NoLegend()
+pdf("query_HC_pred_dimplot.pdf", width = 6, height = 6)
+print(query_HC_pred_dimplot)
+dev.off()
+query_HC_pred_dimplot
+jpeg("query_HC_pred_dimplot.jpg", width = 2400, height = 2400)
+print(query_HC_pred_dimplot)
+dev.off()
+```
+
+```{r Create Nebulosa plots HC}
+plotdens_HC_ref_SOX2 <- plot_density(obj_SCT_HC, "SOX2", legend_title = "SOX2", pal = "inferno", size = 15) +xlim(13,16) +ylim(-6,-3) & NoAxes() & NoLegend()
+jpeg("plotdens_HC_ref_SOX2.jpg", width = 1200, height = 1200)
+print(plotdens_HC_ref_SOX2)
+dev.off()
+plotdens_HC_ref_ATOH1 <- plot_density(obj_SCT_HC, "ATOH1", legend_title = "ATOH1", pal = "inferno", size = 15) +xlim(13,16) +ylim(-6,-3) & NoAxes() & NoLegend()
+jpeg("plotdens_HC_ref_ATOH1.jpg", width = 1200, height = 1200)
+print(plotdens_HC_ref_ATOH1)
+dev.off()
+plotdens_HC_ref_ANXA4 <- plot_density(obj_SCT_HC, "ANXA4", legend_title = "ANXA4", pal = "inferno", size = 15)+xlim(13,16) +ylim(-6,-3)  & NoAxes() & NoLegend()
+jpeg("plotdens_HC_ref_ANXA4.jpg", width = 1200, height = 1200)
+print(plotdens_HC_ref_ANXA4)
+dev.off()
+plotdens_HC_ref_OCM <- plot_density(obj_SCT_HC, "OCM", legend_title = "OCM", pal = "inferno", size = 15) +xlim(13,16) +ylim(-6,-3) & NoAxes() & NoLegend()
+jpeg("plotdens_HC_ref_OCM.jpg", width = 1200, height = 1200)
+print(plotdens_HC_ref_OCM)
+dev.off()
+plotdens_HC_query_SOX2 <- plot_density(query_HC_pred, "SOX2", legend_title = "SOX2", pal = "inferno", size = 15) +xlim(13,16) +ylim(-6,-3) & NoAxes() & NoLegend()
+jpeg("plotdens_HC_query_SOX2.jpg", width = 1200, height = 1200)
+print(plotdens_HC_query_SOX2)
+dev.off()
+plotdens_HC_query_ATOH1 <- plot_density(query_HC_pred, "ATOH1", legend_title = "ATOH1", pal = "inferno", size = 15) +xlim(13,16) +ylim(-6,-3) & NoAxes() & NoLegend()
+jpeg("plotdens_HC_query_ATOH1.jpg", width = 1200, height = 1200)
+print(plotdens_HC_query_ATOH1)
+dev.off()
+```
+
+```{r Create Nebulosa plots POM}
+plotdens_POM_ref_OTOR <- plot_density(obj_SCT_POM, "OTOR", legend_title = "OTOR", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_ref_OTOR.jpg", width = 1200, height = 1200)
+print(plotdens_POM_ref_OTOR)
+dev.off()
+plotdens_POM_ref_CRYM <- plot_density(obj_SCT_POM, "CRYM", legend_title = "CRYM", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10) & NoAxes() & NoLegend()
+jpeg("plotdens_POM_ref_CRYM.jpg", width = 1200, height = 1200)
+print(plotdens_POM_ref_CRYM)
+dev.off()
+plotdens_POM_ref_POU3F4 <- plot_density(obj_SCT_POM, "POU3F4", legend_title = "POU3F4", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_ref_POU3F4.jpg", width = 1200, height = 1200)
+print(plotdens_POM_ref_POU3F4)
+dev.off()
+plotdens_POM_ref_COCH <- plot_density(obj_SCT_POM, "COCH", legend_title = "COCH", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_ref_COCH.jpg", width = 1200, height = 1200)
+print(plotdens_POM_ref_COCH)
+dev.off()
+plotdens_POM_ref_PRRX1 <- plot_density(obj_SCT_POM, "PRRX1", legend_title = "PRRX1", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_ref_PRRX1.jpg", width = 1200, height = 1200)
+print(plotdens_POM_ref_PRRX1)
+dev.off()
+plotdens_POM_query_OTOR <- plot_density(query_POM_pred, "OTOR", legend_title = "OTOR", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_query_OTOR.jpg", width = 1200, height = 1200)
+print(plotdens_POM_query_OTOR)
+dev.off()
+plotdens_POM_query_CRYM <- plot_density(query_POM_pred, "CRYM", legend_title = "CRYM", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10) & NoAxes() & NoLegend()
+jpeg("plotdens_POM_query_CRYM.jpg", width = 1200, height = 1200)
+print(plotdens_POM_query_CRYM)
+dev.off()
+plotdens_POM_query_POU3F4 <- plot_density(query_POM_pred, "POU3F4", legend_title = "POU3F4", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_query_POU3F4.jpg", width = 1200, height = 1200)
+print(plotdens_POM_query_POU3F4)
+dev.off()
+plotdens_POM_query_COCH <- plot_density(query_POM_pred, "COCH", legend_title = "COCH", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_query_COCH.jpg", width = 1200, height = 1200)
+print(plotdens_POM_query_COCH)
+dev.off()
+plotdens_POM_query_PRRX1 <- plot_density(query_POM_pred, "PRRX1", legend_title = "PRRX1", pal = "inferno", size = 15) +xlim(-10,0) +ylim(-2,10)& NoAxes() & NoLegend()
+jpeg("plotdens_POM_query_PRRX1.jpg", width = 1200, height = 1200)
+print(plotdens_POM_query_PRRX1)
+dev.off()
+```
+
+#### Barplot epithelium query
+```{r Bar plot of frequency epithelial query cell line}
+query_epi_pred_analyses <- query_epi_pred
+query_epi_pred_analyses <- subset(query_epi_pred_analyses, subset = (seurat_clusters == "12" | seurat_clusters == "9"|seurat_clusters == "17"|seurat_clusters == "14"|seurat_clusters == "3"|seurat_clusters == "13"|seurat_clusters == "21"|seurat_clusters == "16"| seurat_clusters == "10"|seurat_clusters == "15"))
+
+table.cluster.cellline <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$cellline)
+table.cluster.cellline
+freq.cluster.cellline <- table.cluster.cellline / rowSums(table.cluster.cellline) 
+rowSums(table.cluster.cellline) 
+freq.cellline.cluster <- sweep(table.cluster.cellline, 2, colSums(table.cluster.cellline), '/')
+freq.cellline.cluster
+
+table.cluster.technique <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$technique)
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique)
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+
+freq.cellline <- prop.table(colSums(table.cluster.cellline))
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.cluster <- prop.table(rowSums(table.cluster.cellline)) 
+freq.cellline
+freq.technique
+freq.cluster
+
+df_cellline <- as.data.frame.matrix(freq.cellline.cluster) 
+df_cellline["cluster"] <- rownames(df_cellline)
+
+df_cellline <- df_cellline[c("12","17","9","14","13","21","10","16", "3","15"),]
+
+
+df_cellline <- gather(df_cellline, "cellline", "frequency", c(1:(ncol(df_cellline)-1)))
+df_cellline$cluster <- factor(df_cellline$cluster, levels = unique(df_cellline$cluster))
+df_cellline <- mutate(df_cellline, cellline = fct_relevel(cellline, "WTC_GCaMP", "WTC_SOX2","04i", "H1", "doublet"))
+df_cellline_plot_legend <- ggplot(data = df_cellline) + geom_bar(mapping = aes(x = cellline, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)
+
+df_cellline_plot_legend
+
+
+df_cellline_plot <- ggplot(data = df_cellline) + geom_bar(mapping = aes(x = cellline, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)     & NoAxes() & NoLegend()
+
+df_cellline_plot
+
+pdf("df_epi_cellline.pdf", width = 7, height = 7)
+print(df_cellline_plot)
+dev.off()
+jpeg("df_epi_cellline.jpg", width = 600, height = 1200)
+print(df_cellline_plot)
+dev.off()
+```
+
+```{r BBar plot of frequency epithelial query timepoint}
+table.cluster.timepoint <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$timepoint)
+table.cluster.timepoint
+freq.cluster.timepoint <- table.cluster.timepoint / rowSums(table.cluster.timepoint) 
+rowSums(table.cluster.timepoint) 
+freq.timepoint.cluster <- sweep(table.cluster.timepoint, 2, colSums(table.cluster.timepoint), '/')
+freq.timepoint.cluster
+
+table.cluster.technique <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$technique)
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique)
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+
+freq.timepoint <- prop.table(colSums(table.cluster.timepoint))
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.cluster <- prop.table(rowSums(table.cluster.timepoint)) 
+freq.timepoint
+freq.technique
+freq.cluster
+
+df_timepoint <- as.data.frame.matrix(freq.timepoint.cluster) 
+df_timepoint["cluster"] <- rownames(df_timepoint)
+
+df_timepoint <- df_timepoint[c("12","17","9","14","13","21","10","16", "3","15"),]
+
+
+df_timepoint <- gather(df_timepoint, "timepoint", "frequency", c(1:(ncol(df_timepoint)-1)))
+df_timepoint$cluster <- factor(df_timepoint$cluster, levels = unique(df_timepoint$cluster)) 
+df_timepoint <- mutate(df_timepoint, timepoint = fct_relevel(timepoint, "d75", "d100","d110"))
+df_timepoint_plot_legend <- ggplot(data = df_timepoint) + geom_bar(mapping = aes(x = timepoint, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)
+
+df_timepoint_plot_legend
+
+
+df_timepoint_plot <- ggplot(data = df_timepoint) + geom_bar(mapping = aes(x = timepoint, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)     & NoAxes() & NoLegend()
+
+df_timepoint_plot
+
+pdf("df_epi_timepoint.pdf", width = 7, height = 7)
+print(df_timepoint_plot)
+dev.off()
+jpeg("df_epi_timepoint.jpg", width = 600, height = 1200)
+print(df_timepoint_plot)
+dev.off()
+```
+
+```{r BBar plot of frequency epithelial query method}
+table.cluster.method <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$method)
+table.cluster.method
+freq.cluster.method <- table.cluster.method / rowSums(table.cluster.method) 
+rowSums(table.cluster.method) 
+freq.method.cluster <- sweep(table.cluster.method, 2, colSums(table.cluster.method), '/')
+freq.method.cluster
+
+table.cluster.technique <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$technique)
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique)
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+
+freq.method <- prop.table(colSums(table.cluster.method))
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.cluster <- prop.table(rowSums(table.cluster.method)) 
+freq.method
+freq.technique
+freq.cluster
+
+df_method <- as.data.frame.matrix(freq.method.cluster) 
+df_method["cluster"] <- rownames(df_method)
+
+df_method <- df_method[c("12","17","9","14","13","21","10","16", "3","15"),]
+
+
+df_method <- gather(df_method, "method", "frequency", c(1:(ncol(df_method)-1)))
+df_method$cluster <- factor(df_method$cluster, levels = unique(df_method$cluster)) 
+df_method_plot_legend <- ggplot(data = df_method) + geom_bar(mapping = aes(x = method, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)
+
+df_method_plot_legend
+
+
+df_method_plot <- ggplot(data = df_method) + geom_bar(mapping = aes(x = method, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)     & NoAxes() & NoLegend()
+
+df_method_plot
+
+pdf("df_epi_method.pdf", width = 7, height = 7)
+print(df_method_plot)
+dev.off()
+jpeg("df_epi_method.jpg", width = 600, height = 1200)
+print(df_method_plot)
+dev.off()
+```
+
+```{r Bar plot of frequency epithelial query experiment}
+table.cluster.experiment <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$experiment)
+table.cluster.experiment
+freq.cluster.experiment <- table.cluster.experiment / rowSums(table.cluster.experiment) 
+rowSums(table.cluster.experiment) 
+freq.experiment.cluster <- sweep(table.cluster.experiment, 2, colSums(table.cluster.experiment), '/')
+freq.experiment.cluster
+
+table.cluster.technique <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$technique)
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique)
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+
+freq.experiment <- prop.table(colSums(table.cluster.experiment))
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.cluster <- prop.table(rowSums(table.cluster.experiment)) 
+freq.experiment
+freq.technique
+freq.cluster
+
+df_experiment <- as.data.frame.matrix(freq.experiment.cluster) 
+df_experiment["cluster"] <- rownames(df_experiment)
+
+df_experiment <- df_experiment[c("12","17","9","14","13","21","10","16", "3","15"),]
+
+
+df_experiment <- gather(df_experiment, "experiment", "frequency", c(1:(ncol(df_experiment)-1)))
+df_experiment$cluster <- factor(df_experiment$cluster, levels = unique(df_experiment$cluster)) 
+df_experiment_plot_legend <- ggplot(data = df_experiment) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)
+
+df_experiment_plot_legend
+
+
+df_experiment_plot <- ggplot(data = df_experiment) + geom_bar(mapping = aes(x = experiment, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)     & NoAxes() & NoLegend()
+
+df_experiment_plot
+
+pdf("df_epi_experiment.pdf", width = 7, height = 7)
+print(df_experiment_plot)
+dev.off()
+jpeg("df_epi_experiment.jpg", width = 600, height = 1200)
+print(df_experiment_plot)
+dev.off()
+```
+
+```{r BBar plot of frequency epithelial query technique}
+table.cluster.technique <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$technique)
+table.cluster.technique
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique) 
+rowSums(table.cluster.technique) 
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+freq.technique.cluster
+
+table.cluster.technique <- table(query_epi_pred_analyses@meta.data$seurat_clusters, query_epi_pred_analyses@meta.data$technique)
+freq.cluster.technique <- table.cluster.technique / rowSums(table.cluster.technique)
+freq.technique.cluster <- sweep(table.cluster.technique, 2, colSums(table.cluster.technique), '/')
+
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.technique <- prop.table(colSums(table.cluster.technique))
+freq.cluster <- prop.table(rowSums(table.cluster.technique)) 
+freq.technique
+freq.technique
+freq.cluster
+
+df_technique <- as.data.frame.matrix(freq.technique.cluster) 
+df_technique["cluster"] <- rownames(df_technique)
+
+df_technique <- df_technique[c("12","17","9","14","13","21","10","16", "3","15"),]
+
+
+df_technique <- gather(df_technique, "technique", "frequency", c(1:(ncol(df_technique)-1)))
+df_technique$cluster <- factor(df_technique$cluster, levels = unique(df_technique$cluster)) 
+df_technique_plot_legend <- ggplot(data = df_technique) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)
+
+df_technique_plot_legend
+
+
+df_technique_plot <- ggplot(data = df_technique) + geom_bar(mapping = aes(x = technique, y = frequency, fill = cluster), stat = "identity") +theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black")) + theme(axis.text.x  = element_text(angle=90, hjust=1)) + scale_fill_manual(values = colors_numbered)     & NoAxes() & NoLegend()
+
+df_technique_plot
+
+pdf("df_epi_technique.pdf", width = 7, height = 7)
+print(df_technique_plot)
+dev.off()
+jpeg("df_epi_technique.jpg", width = 600, height = 1200)
+print(df_technique_plot)
+dev.off()
+```
+
+## Heatmap syndromic/nonsyndromic
+According to Delmaghani, S. (2020, Journal of Clinical Medicine) 
+```{r}
+SNHLgenes_POM_heatmap <- DoHeatmap(object = IEO_SCT_ccmiri_PCA30_UMAP_7_oticsub, features = c(
+"COCH",
+"CRYM",
+"GJB3",
+"POU3F4"
+), label = FALSE, size = .5)+ scale_fill_viridis(option="mako")
+SNHLgenes_POM_heatmap
+pdf("SNHLgenes_POM_heatmap.pdf", width = 10, height = 1.5)
+print(SNHLgenes_POM_heatmap)
+dev.off()
+
+SNHLgenes_HC_heatmap <- DoHeatmap(object = IEO_SCT_ccmiri_PCA30_UMAP_7_oticsub, features = c(
+"ATP2B2",
+"CABP2",
+"CDC14A",
+"CDH23",
+"CLRN2",
+"DIABLO",
+"DMXL2",
+"EPS8",
+"EPS8L2",
+"ESPN",
+"GRXCR1",
+"GRXCR2",
+"HOMER2",
+"KCNQ4",
+"LOXHD1",
+"MIR96",
+"MYO15A",
+"MYO3A",
+"MYO6",
+"MYO7A",
+"OSBPL2",
+"OTOF",
+"PCDH15",
+"PDE1C",
+"PDZD7",
+"PJVK",
+"PLS1",
+"POU4F3",
+"PRPS1",
+"PTPRQ",
+"RDX",
+"RIPOR2",
+"SIX1",
+"SERPINB6",
+"SLC17A8",
+"SLC26A5",
+"STRC",
+"SYNE4",
+"TBC1D24",
+"TNC",
+"USH1C",
+"WHRN"
+), label = FALSE, size = .5)+ scale_fill_viridis(option="mako")
+SNHLgenes_HC_heatmap
+pdf("SNHLgenes_HC_heatmap.pdf", width = 10, height = 8)
+print(SNHLgenes_HC_heatmap)
+dev.off()
+
+SNHLgenes_neurosensory_heatmap <- DoHeatmap(object = IEO_SCT_ccmiri_PCA30_UMAP_7_oticsub, features = c(
+"ACTG1",
+"ADCY1",
+"CEACAM16",
+"CIB2",
+"CLDN9",
+"CLIC5",
+"DCDC2",
+"DIAPH1",
+"ELMOD3",
+"GIPC3",
+"KARS1",
+"LHFPL5",
+"LRTOMT",
+"MSRB3",
+"TJP2",
+"TRIOBP"
+), label = FALSE, size = .5)+ scale_fill_viridis(option="mako")
+SNHLgenes_neurosensory_heatmap
+pdf("SNHLgenes_neurosensory_heatmap.pdf", width = 10, height = 4)
+print(SNHLgenes_neurosensory_heatmap)
+dev.off()
+
+SNHLgenes_otherepi_heatmap <- DoHeatmap(object = IEO_SCT_ccmiri_PCA30_UMAP_7_oticsub, features = c(
+"AIFM1",
+"BDP1",
+"BSND",
+"CCDC50",
+"CD164",
+"CLDN14",
+"COL11A1",
+"COL11A2",
+"COL4A6",
+"DIAPH3",
+"ESRP1",
+"ESRRB",
+"EYA4",
+"GAB1",
+"GAS2",
+"GJB2",
+"GJB6",
+"GPSM2",
+"GRHL2",
+"GSDME",
+"HGF",
+"IFNLR1",
+"ILDR1",
+"KITLG",
+"LMX1A",
+"MAP1B",
+"MARVELD2",
+"MCM2",
+"MET",
+"METTL13",
+"MPZL2",
+"MYH14",
+"MYH9",
+"NARS2",
+"OTOA",
+"OTOG",
+"OTOGL",
+"P2RX2",
+"PNPT1",
+"PPIP5K2",
+"REST",
+"ROR1",
+"S1PR2",
+"SCD5",
+"SLC12A2",
+"SLC26A4",
+"SMPX",
+"SPNS2",
+"TECTA",
+"TMC1",
+"TMEM132E",
+"TMIE",
+"TMPRSS3",
+"TPRN",
+"TRRAP",
+"TSPEAR",
+"WBP2",
+"WFS1"
+), label = FALSE, size = .5)+ scale_fill_viridis(option="mako")
+SNHLgenes_otherepi_heatmap
+pdf("SNHLgenes_otherepi_heatmap.pdf", width = 10, height = 10)
+print(SNHLgenes_otherepi_heatmap)
+dev.off()
+```
